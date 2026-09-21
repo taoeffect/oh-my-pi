@@ -7,6 +7,8 @@
 - Added per-session approval options to tool approval prompts: "Approve <tool> Commands for Session" skips further prompts for that tool for the rest of the session, and "Approve Similar <tool> Commands for Session" auto-approves later calls a small classifier judges similar to the approved one. The classifier is the `TINY` role model from `/models` (else `smol`) and is not configurable, since a `YES` runs the call with no prompt. Grants are in-memory per session and never bypass `deny` policies, pending provider safety checks, or tool-demanded prompts, and `task` calls are excluded from them entirely ([#4608](https://github.com/can1357/oh-my-pi/issues/4608)).
 - Added session-wide file grants to "Approve Similar": the approved call's write targets are recorded, so approving a `write` covers a later `edit` of the same file, and a command's write targets — named by the classifier and kept only when quoted verbatim in the approved subject — cover both. `write`/`edit` targets come from the call's own arguments and match with no model call. A grant only ever covers writing: a call that deletes a file or moves it away always prompts, and grants nothing for the path it removes ([#4608](https://github.com/can1357/oh-my-pi/issues/4608)).
 - Added `metadataForProvider(provider)` to the custom-tool context ([#4608](https://github.com/can1357/oh-my-pi/issues/4608)).
+- Added the opt-in `session_tokens` status-line segment, showing the live context token count so it drops after `/handoff` or compaction, unlike the cumulative `token_total` ([#11643](https://github.com/can1357/oh-my-pi/issues/11643)).
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
