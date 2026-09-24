@@ -8,12 +8,127 @@
 - Added session-wide file grants to "Approve Similar": the approved call's write targets are recorded, so approving a `write` covers a later `edit` of the same file, and a command's write targets — named by the classifier and kept only when quoted verbatim in the approved subject — cover both. `write`/`edit` targets come from the call's own arguments and match with no model call. A grant only ever covers writing: a call that deletes a file or moves it away always prompts, and grants nothing for the path it removes ([#4608](https://github.com/can1357/oh-my-pi/issues/4608)).
 - Added `metadataForProvider(provider)` to the custom-tool context ([#4608](https://github.com/can1357/oh-my-pi/issues/4608)).
 - Added the opt-in `session_tokens` status-line segment, showing the live context token count so it drops after `/handoff` or compaction, unlike the cumulative `token_total` ([#11643](https://github.com/can1357/oh-my-pi/issues/11643)).
+- Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
+- Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
+- Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.
+- Added support for multiple simultaneous browser instances, allowing tabs from browsers such as Chrome and Edge to remain connected and usable at the same time.
+
+### Changed
+
+- Shortened the default system prompt by removing redundant rules and empty sections, reducing token usage by about 150 tokens with default settings.
+- Added `additionalContext` to extension and hook `tool_call` results, plus `ctx.addAdditionalContext()` for registered tools, to pass trusted instructions to the model after a tool call without changing its result ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
+- Added Anthropic fallback credit token preservation across same-provider classifier refusal fallbacks, including continuation through signed thinking turns.
+
+### Fixed
+
+- Fixed `vault://` paths resolving to a different spelling for bash than for reads on Windows when `TEMP` or the profile directory uses an 8.3 short name like `ADMINI~1` ([#7911](https://github.com/can1357/oh-my-pi/issues/7911), [#7938](https://github.com/can1357/oh-my-pi/pull/7938) by [@CoderTCY](https://github.com/CoderTCY))
+- Fixed the bash tool on Windows keeping 8.3 short-name spellings like `ADMINI~1` in its working directory; `pwd` and `$PWD` now report the long path ([#7938](https://github.com/can1357/oh-my-pi/pull/7938) by [@CoderTCY](https://github.com/CoderTCY))
+- `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
+- Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
+- Fixed advisor reviews making an extra model request after a turn whose only tool calls were `advise`. That request re-sent the whole review context just so the advisor could reply "done", with no new notes. The review now ends after the advise-only turn; a turn that also calls other tools continues as before ([#13132](https://github.com/can1357/oh-my-pi/pull/13132) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed the advisor replaying the whole main transcript after the main session's per-turn prune blanked tool results it had already seen. The advisor now keeps its context across the prune; rollback, branch, edited messages, compaction and session switch still re-prime it (part of [#7226](https://github.com/can1357/oh-my-pi/issues/7226), [#13131](https://github.com/can1357/oh-my-pi/pull/13131) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed `/login` crashing source-link and dev installs with `NameTooLong reading "file:file:…"` once an extension loader had loaded. The legacy-pi specifier shim no longer re-enters itself while resolving a canonical `@oh-my-pi/pi-*` subpath such as `@oh-my-pi/pi-ai/index.js`, so `require()` of those subpaths resolves to the host copy ([#12293](https://github.com/can1357/oh-my-pi/issues/12293), [#13127](https://github.com/can1357/oh-my-pi/pull/13127) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed advisors configured with `auto` thinking running at `medium` instead of following the main session's current effort. An `auto` advisor now runs at the effort the main session uses for the current turn (the classifier's pick under `auto`, the set level otherwise, `medium` when thinking is off), updated at each review without rebuilding the advisor; on a retry-fallback model it keeps the fallback's effort until its main model is restored ([#13130](https://github.com/can1357/oh-my-pi/pull/13130) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed large edit diffs being sent whole in advisor reviews; they are now redacted and cut to the same 8 KiB / 80-line budget as other tool output ([#13129](https://github.com/can1357/oh-my-pi/pull/13129) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Updated `omp update` and the startup update check to use the configured npm registry, including scoped registries and authentication tokens.
+- Fixed auto-QA grievance uploads so an invalid report no longer blocks the rest of the queue; rejected reports are now reported with the server error.
+- Fixed Windows `read` failures for existing files when a line selector such as `:1-40` is used.
+- Fixed memory storage error reporting so failed `retain`, `learn`, and backend saves identify the failed item and include the underlying storage error.
+- Fixed malformed user-level `mcp.json` files disabling all MCP sources; valid sources now continue loading with a warning.
+- Fixed retry fallback loops that could retry indefinitely when a fallback resolved to the same effective request.
+- Fixed the setup wizard incorrectly reporting Gemini web search as unconfigured when Antigravity OAuth is active.
+- Fixed headless print mode abandoning the advisor's final review when the review model fails and a configured fallback reviewer is available.
+- Fixed embedded shell startup when the inherited working directory has been deleted.
+- Fixed Codex usage displays showing a stale subscription plan after the account plan changed.
+- Fixed explicit model or provider selections from bypassing `disabledProviders`; disabled providers are now refused and skipped during fallback.
+- Fixed usage views incorrectly combining model-specific quota limits with shared quota windows; each limit is now shown separately.
+- Fixed `write xd://<tool>` handling of devices with lenient argument validation so tools can provide their own precise responses for schema mismatches.
+- Fixed Anthropic server-side fallback requests failing because of an invalid fallback model name.
+- Fixed requests to large-output models failing near the context limit; the output allowance now adjusts to fit the remaining context.
+- Fixed system prompts that referenced tools by bare names when those tools were available only through `xd://` devices, including Hindsight and Mnemopi memory tools.
+- Fixed dictation remaining active when recording was restarted while the previous clip was still transcribing.
+- Fixed accounts that the auth layer signs out automatically going unannounced while the session silently moved to a sibling account: the session now warns with the account and the `/login` step, `omp -p` writes the warning to stderr, and JSON/RPC output carries it as a `notice` event. The auth broker now logs these disables as `Auth credential disabled` instead of `auth-broker credential disabled` ([#13190](https://github.com/can1357/oh-my-pi/pull/13190) by [@alphastorm](https://github.com/alphastorm)).
+
+## [18.3.0] - 2026-09-24
+
+### Breaking Changes
+
+- The `hub` tool is deprecated; use `wait`, `write`, and the `proc://` protocols instead.
+- The `irc.timeoutMs` configuration setting has been removed.
+- The edit mode syntax now uses `*** Edit File:`, `*** Find`, and `*** Replace` headers instead of `SM:` headers.
+- Cancelling a process through `write` now requires an explicit `proc://<id>/kill` target; other write targets validate content normally.
+
+### Added
+
+- Added `omp://` documentation scopes for `find` and `omp find`. Search all embedded harness documentation with `omp://` or a specific document with `omp://<file>.md`; results are returned as canonical URLs that `read` can open, including range selectors.
+- Added extension support for ephemeral, `/btw`-style side turns through `ctx.runEphemeralTurn()`, with optional tool suppression and output/context limits without adding the turn to session history.
+- Added background job and service management through the `wait` tool and `proc://` URLs, including supervised services in `bash` and direct agent messaging through `agent://` write targets.
+- Added `*** Insert Before` and `*** Insert After` edit operations for adding lines without replacing existing code.
+- Added the `toks` command for offline token counting, including support for Jev (TypeSafe Jev 1.13) encodings.
+- Added automatic discovery of Apple Foundation Models on supported Apple silicon devices.
+- Added `/changelog last [N]` for viewing the latest release or a selected number of recent releases.
+- Added terminal-based OAuth authentication with `omp login`, including browser-assisted login, account and organization details, and automatic model discovery refresh. Added provider support for `org-scoped-identity`, `oauth-token-env`, and per-account OAuth priority/reserve policies through `auth.accountPolicies`, with policy state shown by `omp usage`.
+- Added the `daybreak` badge to `omp usage` for enabled accounts.
+- Added `/export` and `/usage` to focused subagent views for exporting a focused transcript and viewing account usage without returning to the main session.
+- Pasted clipboard images are now saved in the session artifact directory, allowing agents to read, copy, or upload them by file path.
+- Added `/annotate` for attaching notes to diffs, replies, session messages, files, or quoted text and inserting or sending those notes in prompts and reviews.
+- Added configurable MCP startup behavior through `MCP_STARTUP_TIMEOUT_MS`/`mcp.startupTimeoutMs` and `OMP_MCP_REQUIRE_READY=1`, allowing headless runs to require MCP servers to become ready before the first turn.
+- Added native judgment usage reporting, including error stop reasons and messages, and added `openrouter/~typesafe/jev-latest` as a native judge candidate.
+
+### Changed
+
+- Session compaction now supports native Anthropic snapshot branches and rewinds.
+- The default `bash.autoBackground.strategy` is now `catalog`.
+- The `Launch` configuration group has been renamed to `Services`.
+- Terminal OAuth behavior is now consistent between `omp login` and `omp auth-broker login`.
+- Judgment fallback now uses only native candidates, preventing prompted models from replacing failed native judges.
+- Browser screenshot comparisons now tolerate minor rasterizer differences.
+
+### Fixed
+
+- Fixed credential-aware API key resolution during authentication rotation.
+- Fixed comma-separated line selectors in `read`, `grep` paths, and `fetch`; selectors now read the requested range, while a bare number selects only that line.
+- Fixed `write` reporting JavaScript character counts instead of UTF-8 byte counts.
+- Fixed background job and service status reporting, including incorrect durations, reused job IDs, stale logs after named-service restarts, and foreground calls incorrectly appearing as background jobs.
+- Fixed `wait` and agent messaging so completed subagent results and peer messages are delivered reliably, including when a wait is interrupted by an incoming message.
+- Fixed headless print mode dropping or silently ignoring MCP servers that start slowly; it now waits within the configured timeout and warns when a server is not ready.
+- Fixed reader-mode `fetch` sending inline SVG icons and base64 images as unreadable model input; alt text is retained instead.
+- Fixed long non-Latin judged TTSR output exceeding token limits by applying token-aware truncation.
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed nested `eval` Todo updates not being reflected by the Todo tracker, including cases where a cell fails after committing an update.
+- Fixed strict-mode structured-output validation for JSON Schemas without a root `type`, preserving their `items` and `required` keywords.
+- Improved streamed TTSR whole-buffer matching to avoid repeated scans from the beginning of the buffer.
+- Fixed plural browser queries when compiled binaries provide shallow stack traces.
+- Fixed browser `tab.fill` timing out on pages whose animation frames stall.
+- Fixed the first LSP diagnostics request returning no results while a newly started language server is still analyzing.
+- `/shake thinking` now reports the number of tokens freed.
+
+## [18.2.10] - 2026-09-22
+
+### Added
+
+- Added live benchmark results table with real-time model ranking and per-kind performance metrics
+- Added dedicated prefill throughput reporting for prefill-focused benchmarks
+- Added `/record` slash command to capture terminal sessions as replayable `.ompcast` files
+- Added `omp play` CLI for terminal-based playback of session recordings
+- Added intent descriptions to judgment batching
+- Added live progress tracking for judgment batches in the TUI
+
+### Changed
+
+- Refined AI-assisted git staging verification to reduce false positives
+- Updated `omp bench` default profile to `chat` and improved CLI flag documentation
+- Coalesced judgment batch drain operations for better performance under high load
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
 
 - Added Claude saved resets to usage views and `/usage reset`, with automatic blocked-limit recovery and expiring-reset redemption controlled by `claudeResets`.
-
 - Added support for searching embedded harness documentation with `find` and `omp find` using `omp://` scopes, including file-specific searches and `:start-end` selectors; results open directly through canonical `omp://` URLs.
 
 ### Changed
@@ -1774,3 +1889,4 @@
 - Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
 
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@da359efe2858](https://github.com/can1357/oh-my-pi/blob/da359efe2858f68baa4ae290574c7c4c9c8da3c3/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@d95ba9ea5e83](https://github.com/can1357/oh-my-pi/blob/d95ba9ea5e8370e1cc0e7fc83cef7c7db862b543/packages/coding-agent/CHANGELOG.md).

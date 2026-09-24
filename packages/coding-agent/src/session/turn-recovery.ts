@@ -16,10 +16,12 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolChoice,
+	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -38,6 +40,7 @@ import {
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
+	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -63,6 +66,7 @@ import {
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
+import { describeUsageFallback } from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -278,6 +282,10 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#activeFallbackCreditRedemption?: {
+		targetSelector: string;
+		handle: AnthropicFallbackCreditHandle;
+	};
 	#usageReserveApprovedSelector: string | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
@@ -418,11 +426,26 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
+		this.#activeFallbackCreditRedemption = undefined;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
 	setAcceptTerminalEmptyStop(accept: boolean): void {
 		this.#acceptTerminalEmptyStopForPrompt = accept;
+	}
+
+	/** Consumes any queued Anthropic fallback credit handle for the retry turn. */
+	consumeActiveFallbackCreditRedemption(targetModel?: Model): AnthropicFallbackCreditHandle | undefined {
+		const active = this.#activeFallbackCreditRedemption;
+		if (!active) return undefined;
+		if (targetModel && `${targetModel.provider}/${targetModel.id}` !== active.targetSelector) {
+			return undefined;
+		}
+		this.#activeFallbackCreditRedemption = undefined;
+		if (Date.now() >= active.handle.expiresAt) {
+			return undefined;
+		}
+		return active.handle;
 	}
 
 	/**
@@ -624,7 +647,7 @@ export class TurnRecovery {
 			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
-				const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
+				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
 					activeModel.provider,
 					this.#host.sessionId(),
 					{
@@ -1675,7 +1698,7 @@ export class TurnRecovery {
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		let health: ModelUsageHealth;
 		try {
-			health = await this.#host.modelRegistry.authStorage.getModelUsageHealth(currentModel.provider, {
+			health = await this.#host.modelRegistry.authStorage.health.model(currentModel.provider, {
 				modelId: currentModel.id,
 				sessionId: this.#host.sessionId(),
 				baseUrl: currentModel.baseUrl,
@@ -1700,10 +1723,7 @@ export class TurnRecovery {
 				selectedAccount.state !== "healthy" &&
 				health.accounts.some(account => account.state === "healthy")
 			) {
-				this.#host.modelRegistry.authStorage.releaseSessionCredentialForReselection(
-					currentModel.provider,
-					this.#host.sessionId(),
-				);
+				this.#host.modelRegistry.authStorage.sessions.release(currentModel.provider, this.#host.sessionId());
 			}
 			return false;
 		}
@@ -1744,7 +1764,7 @@ export class TurnRecovery {
 				// (issue #8065).
 				if (!this.#host.contextFitsModel(candidateModel)) continue;
 				try {
-					const candidateHealth = await this.#host.modelRegistry.authStorage.getModelUsageHealth(
+					const candidateHealth = await this.#host.modelRegistry.authStorage.health.model(
 						candidateModel.provider,
 						{
 							modelId: candidateModel.id,
@@ -1763,7 +1783,7 @@ export class TurnRecovery {
 							selected.state !== "healthy" &&
 							candidateHealth.accounts.some(account => account.state === "healthy")
 						) {
-							this.#host.modelRegistry.authStorage.releaseSessionCredentialForReselection(
+							this.#host.modelRegistry.authStorage.sessions.release(
 								candidateModel.provider,
 								this.#host.sessionId(),
 							);
@@ -1818,6 +1838,7 @@ export class TurnRecovery {
 			pinFallback: true,
 			apiKey: fallback.apiKey,
 			signal,
+			reason: describeUsageFallback(health, this.#host.settings.get("retry.usageReservePct")),
 		});
 	}
 
@@ -1837,11 +1858,33 @@ export class TurnRecovery {
 		}
 	}
 
+	/**
+	 * Whether applying `candidate` at `selector`'s thinking level would leave the
+	 * request unchanged: the same routed model identity (provider, id AND the
+	 * `@upstream` route `formatModelStringWithRouting` preserves) and the same
+	 * effective thinking level after the ceiling clamp in
+	 * {@link applyRetryFallbackCandidate} and the per-model clamp in
+	 * `setThinkingLevel`. A different route or a different effective level is a
+	 * real change of request and stays eligible.
+	 */
+	#isNoOpRetryFallback(candidate: Model, selector: RetryFallbackSelector): boolean {
+		const active = this.#host.model();
+		if (!active || formatModelStringWithRouting(candidate) !== formatModelStringWithRouting(active)) return false;
+		const configured = this.#host.configuredThinkingLevel();
+		const requested = selector.thinkingLevel ?? configured;
+		if (requested === AUTO_THINKING || configured === AUTO_THINKING) return requested === configured;
+		const effective = resolveThinkingLevelForModel(
+			candidate,
+			clampThinkingLevelToCeiling(candidate, requested, this.#host.thinkingLevelCeiling()),
+		);
+		return effective === configured;
+	}
+
 	async applyRetryFallbackCandidate(
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
+		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -1918,6 +1961,7 @@ export class TurnRecovery {
 			from: currentSelector,
 			to: selector.raw,
 			role,
+			reason: options?.reason,
 		});
 		return true;
 	}
@@ -1938,19 +1982,42 @@ export class TurnRecovery {
 			: this.#host.agent.state.messages.findLast(
 					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
 				);
+		// Permitted redemption targets are catalog policy on the refused model.
+		const failedModel = failedMessage.fallbackCreditHandle
+			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
+			: undefined;
+		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				// A candidate that would leave the request exactly as it is — same
+				// routed model, same effective thinking level — is not a switch, and
+				// must never be applied: `findRetryFallbackCandidates` excludes the
+				// current model by selector STRING, while what gets applied is what
+				// `resolveModelOverride` resolves that string to, clamped. When those
+				// disagree, the swap "succeeds" onto the failing request, the caller
+				// sets `switchedModel`, and the retry budget is reset to 1 on every
+				// failure — an unbounded retry loop against a model that cannot work.
+				if (this.#isNoOpRetryFallback(candidate, selector)) continue;
 				if (options?.excludeProvider === candidate.provider) continue;
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider
 				// model switch can satisfy neither constraint, so keep retrying the
 				// source model or consider a later cross-provider candidate whose
 				// message transform can safely demote the foreign thinking.
+				// Exception: when redeeming Anthropic fallback credit on refusal, the server
+				// validates thinking blocks across the boundary itself using the credit token.
+				const canRedeemFallbackCredit =
+					failedMessage.fallbackCreditHandle !== undefined &&
+					candidate.api === "anthropic-messages" &&
+					candidate.provider === failedMessage.provider &&
+					creditTargets.includes(candidate.id) &&
+					Date.now() < failedMessage.fallbackCreditHandle.expiresAt;
 				if (
+					!canRedeemFallbackCredit &&
 					candidate.api === "anthropic-messages" &&
 					latestAssistant?.api === "anthropic-messages" &&
 					latestAssistant.provider === candidate.provider &&
@@ -1974,7 +2041,19 @@ export class TurnRecovery {
 				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
-				return this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
+				const previousEditMode = this.#host.resolveActiveEditMode();
+				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+					...options,
+					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
+				});
+				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
+				if (applied && options?.pinFallback === true && canRedeemFallbackCredit && !editModeChanged) {
+					this.#activeFallbackCreditRedemption = {
+						targetSelector: `${candidate.provider}/${candidate.id}`,
+						handle: failedMessage.fallbackCreditHandle!,
+					};
+				}
+				return applied;
 			}
 		}
 
@@ -2085,6 +2164,7 @@ export class TurnRecovery {
 			from: currentSelector,
 			to: baseSelector,
 			role: "fireworks-fast",
+			reason: "Request rejected by the Fast tier. Retrying on the Standard tier.",
 		});
 		return true;
 	}
@@ -2329,7 +2409,7 @@ export class TurnRecovery {
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
 		if (accountPolicyDenial && currentModel) {
-			switchedCredential = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
+			switchedCredential = await this.#host.modelRegistry.authStorage.limits.rotate(
 				currentModel.provider,
 				this.#host.sessionId(),
 				{ error: errorMessage, modelId: currentModel.id },
