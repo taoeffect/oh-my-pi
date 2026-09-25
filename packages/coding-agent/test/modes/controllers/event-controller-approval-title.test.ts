@@ -21,6 +21,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { approveToolForSession, clearSessionApprovals } from "@oh-my-pi/pi-coding-agent/tools/session-approvals";
+import { cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import type { TerminalTitleState } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 
@@ -84,7 +85,7 @@ describe("EventController approval title mirror", () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
 		titleSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
-		settings.override("tools.approvalMode", "always-ask");
+		cfgToolsApprovalMode.override(settings, "always-ask");
 		ctx = createFixture();
 	});
 

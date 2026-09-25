@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { truncateForPrompt } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import type { ApprovalSimilarityDeps } from "@oh-my-pi/pi-coding-agent/tools/approval-similarity";
 import {
@@ -46,17 +47,9 @@ function grantSimilar(toolName: string, subject: string, args: unknown = { comma
 }
 
 function classifierSettings(withSmolRole = true): ApprovalSimilarityDeps["settings"] {
-	return {
-		get() {
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return withSmolRole && role === "smol" ? `${classifierModel.provider}/${classifierModel.id}` : undefined;
-		},
-		getStorage() {
-			return undefined;
-		},
-	} as never;
+	return Settings.isolated(
+		withSmolRole ? { modelRoles: { smol: `${classifierModel.provider}/${classifierModel.id}` } } : {},
+	);
 }
 
 function classifierRegistry(available: unknown[] = [classifierModel]): ApprovalSimilarityDeps["registry"] {
