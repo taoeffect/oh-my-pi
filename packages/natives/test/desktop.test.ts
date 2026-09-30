@@ -46,16 +46,10 @@ describe("DesktopSession", () => {
 			expect(typeof capabilities.input).toBe("boolean");
 			expect(typeof capabilities.ax).toBe("boolean");
 			expect(typeof capabilities.backgroundWindowInput).toBe("boolean");
-			expect(Array.isArray(capabilities.deliveryModes)).toBe(true);
-			for (const mode of capabilities.deliveryModes) {
-				expect(typeof mode).toBe("string");
-			}
-			// Wayland reports a distinct pre-consent permission state; see the Rust backend's capabilities().
-			const permissionStates =
-				capabilities.backend === "wayland" ? [...PERMISSION_STATES, "prompt-or-granted"] : PERMISSION_STATES;
-			expect(permissionStates).toContain(capabilities.capturePermission);
-			expect(permissionStates).toContain(capabilities.inputPermission);
-			expect(permissionStates).toContain(capabilities.axPermission);
+			expect(typeof capabilities.takeover).toBe("boolean");
+			expect(PERMISSION_STATES).toContain(capabilities.capturePermission);
+			expect(PERMISSION_STATES).toContain(capabilities.inputPermission);
+			expect(PERMISSION_STATES).toContain(capabilities.axPermission);
 			expect(typeof capabilities.displayCount).toBe("number");
 		} finally {
 			await session.close();
