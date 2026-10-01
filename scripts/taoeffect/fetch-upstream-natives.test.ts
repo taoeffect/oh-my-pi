@@ -8,8 +8,8 @@ async function leafTarball(files: Record<string, string>): Promise<Uint8Array> {
 }
 
 describe("verifyIntegrity", () => {
-	test("rejects a tarball whose sha512 differs from the npm dist.integrity", async () => {
-		const tarball = await leafTarball({ "package/pi_natives.linux-arm64.node": "addon" });
+	test("rejects a tarball whose sha512 differs from the npm dist.integrity", () => {
+		const tarball = new TextEncoder().encode("leaf tarball");
 		const otherIntegrity = `sha512-${new Bun.CryptoHasher("sha512").update("other").digest("base64")}`;
 		expect(() => verifyIntegrity(tarball, otherIntegrity, "leaf")).toThrow(/failed the integrity check/);
 	});
