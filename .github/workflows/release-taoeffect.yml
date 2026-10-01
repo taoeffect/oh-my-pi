@@ -124,9 +124,10 @@ jobs:
            run: bun scripts/ci-test-ts.ts "$TEST_BUCKET"
 
    # Every leg builds on Linux. On a Linux host ci-release-build-binaries.ts runs
-   # no codesign, so the darwin binaries keep only the ad-hoc linker signature
-   # that Bun writes (Apple Silicon refuses arm64 binaries with no signature).
-   # The fork ships no Developer ID signing or notarization, like the Crush fork.
+   # no codesign. darwin-arm64 keeps only the ad-hoc linker signature that Bun
+   # writes (Apple Silicon refuses arm64 binaries with no signature); darwin-x64
+   # ships unsigned. The fork ships no Developer ID signing or notarization, like
+   # the Crush fork.
    build:
       name: Build ${{ matrix.target }}
       needs: metadata
@@ -162,6 +163,13 @@ jobs:
            env:
               RELEASE_TARGETS: ${{ matrix.target }}
            run: bun run ci:release:build-binaries
+         # Bun leaves an invalid copy of its own runtime's signature in a
+         # cross-compiled darwin-x64 binary, and macOS kills such a binary. This
+         # removes it (the Crush fork's x86_64 binary is unsigned too) and fails
+         # when darwin-arm64 lacks a valid signature. It never signs anything.
+         - name: Check darwin code signature
+           if: startsWith(matrix.target, 'darwin-')
+           run: bun scripts/taoeffect/fix-macho-signature.ts "packages/coding-agent/binaries/omp-$TARGET"
          - name: Create release archive
            env:
               ARCHIVE_SUFFIX: ${{ matrix.archive_suffix }}
