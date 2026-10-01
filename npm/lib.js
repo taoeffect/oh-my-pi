@@ -12,12 +12,6 @@ import * as tar from "tar";
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 const vendorBinaryPath = join(packageRoot, "vendor", "omp", "omp");
 
-const PLATFORM_KEYS = new Map([
-	["linux:x64", "linux-x64"],
-	["linux:arm64", "linux-arm64"],
-	["darwin:x64", "darwin-x64"],
-	["darwin:arm64", "darwin-arm64"],
-]);
 const PATH_SEGMENT = /^[\w.+-]+$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 const PERMISSION_ERROR_CODES = new Set(["EACCES", "EPERM", "EROFS"]);
@@ -25,9 +19,7 @@ const PERMISSION_ERROR_CODES = new Set(["EACCES", "EPERM", "EROFS"]);
 const INTERRUPT_SIGNALS = ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"];
 
 function platformKey() {
-	const key = PLATFORM_KEYS.get(`${process.platform}:${process.arch}`);
-	if (!key) throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
-	return key;
+	return `${process.platform}-${process.arch}`;
 }
 
 export async function readPackageJson() {
