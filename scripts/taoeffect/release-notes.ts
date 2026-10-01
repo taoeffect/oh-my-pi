@@ -94,6 +94,28 @@ function formatReleaseNotes(notes: string, upstreamTag: string, model: string): 
 	return `${sections.filter(Boolean).join("\n\n")}\n`;
 }
 
+/**
+ * Returns the release notes in a Z.ai chat-completion reply. Z.ai sends replies
+ * that ended early (`sensitive`, `network_error`, …) with HTTP 200, so only
+ * `finish_reason: "stop"` counts as complete.
+ */
+export function readReleaseNotesReply(body: unknown): string {
+	const completion = ChatCompletion(body);
+	if (completion instanceof type.errors) throw new Error(`Unexpected Z.ai response: ${completion.summary}`);
+	const choice = completion.choices?.[0];
+	if (choice?.finish_reason !== "stop") {
+		throw new Error(
+			choice?.finish_reason === "length"
+				? `Z.ai stopped at the ${MAX_COMPLETION_TOKENS}-token limit before the release notes were complete`
+				: `Z.ai did not complete the release notes (finish_reason: ${choice?.finish_reason ?? "none"})`,
+		);
+	}
+	return (choice.message?.content ?? "")
+		.replace(/^```(?:markdown)?\s*/i, "")
+		.replace(/\s*```$/i, "")
+		.trim();
+}
+
 async function requestReleaseNotes(options: {
 	apiKey: string;
 	model: string;
@@ -118,18 +140,7 @@ async function requestReleaseNotes(options: {
 	if (!response.ok) {
 		throw new Error(`Z.ai release notes request failed with ${response.status}: ${await response.text()}`);
 	}
-	const completion = ChatCompletion(await response.json());
-	if (completion instanceof type.errors) throw new Error(`Unexpected Z.ai response: ${completion.summary}`);
-	const choice = completion.choices?.[0];
-	if (choice?.finish_reason === "length") {
-		throw new Error(
-			`Z.ai stopped at the ${MAX_COMPLETION_TOKENS}-token limit before the release notes were complete`,
-		);
-	}
-	return (choice?.message?.content ?? "")
-		.replace(/^```(?:markdown)?\s*/i, "")
-		.replace(/\s*```$/i, "")
-		.trim();
+	return readReleaseNotesReply(await response.json());
 }
 
 function git(args: readonly string[]) {
