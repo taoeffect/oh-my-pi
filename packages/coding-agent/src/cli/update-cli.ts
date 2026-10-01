@@ -41,6 +41,18 @@ const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
+ * npm wrapper package of the taoeffect fork (`npm/` in this repo). Fork release
+ * builds update only from it, so `omp update` never replaces the fork with upstream.
+ */
+const FORK_PACKAGE = "@taoeffects/omp";
+const FORK_REPO = "taoeffect/oh-my-pi";
+/** Set by the {@link FORK_PACKAGE} launcher (`npm/run-omp.js`) for the omp process it starts. */
+const FORK_NPM_WRAPPER_ENV = "OMP_TAOEFFECTS_NPM_WRAPPER";
+
+/** Only fork CI release builds carry an `X.Y.Z-taoeffect.N` version; source and dev runs do not. */
+const FORK_RELEASE_VERSION = /-taoeffect\.\d+$/;
+
+/**
  * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
  * version sentinel the loader looks up at runtime matches the `.node` on
  * disk; see {@link buildBunInstallArgs} for why this must be installed
@@ -880,14 +892,25 @@ async function fetchLatestManifest(
  * The registry comes from the user's npm/bun configuration
  * ({@link loadNpmRegistryResolver}), so a configured feed is honored for every
  * install method, including standalone binaries.
+ *
+ * A fork release build (`currentVersion` matches {@link FORK_RELEASE_VERSION})
+ * checks the `latest` dist-tag of {@link FORK_PACKAGE} instead; the fork has no
+ * canary channel.
  */
 export async function getLatestRelease(
-	options: { timeoutMs?: number; channel?: UpdateChannel; registries?: NpmRegistryResolver } = {},
+	options: {
+		timeoutMs?: number;
+		channel?: UpdateChannel;
+		registries?: NpmRegistryResolver;
+		currentVersion?: string;
+	} = {},
 ): Promise<ReleaseInfo> {
 	const timeoutMs = options.timeoutMs ?? RELEASE_METADATA_TIMEOUT_MS;
-	const channel = options.channel ?? "stable";
+	const forkBuild = FORK_RELEASE_VERSION.test(options.currentVersion ?? VERSION);
+	const channel = forkBuild ? "stable" : (options.channel ?? "stable");
 	const registries = options.registries ?? (await loadNpmRegistryResolver());
 	const packages: ReleasePackages = { ...CURRENT_PACKAGES };
+	if (forkBuild) packages.pkg = FORK_PACKAGE;
 	const visited = new Set([packages.pkg]);
 	let registry = registries(packages.pkg);
 	let latest = await fetchLatestManifest(packages.pkg, registry, timeoutMs, channel);
@@ -2114,15 +2137,50 @@ function persistChannel(channel: UpdateChannel): void {
 }
 
 /**
+ * Update a fork release build from {@link FORK_PACKAGE}. Only an omp started by
+ * that package's launcher runs npm; any other install (for example a binary
+ * downloaded by hand) gets the commands to run instead.
+ */
+async function updateForkRelease(release: ReleaseInfo): Promise<void> {
+	const args = ["install", "-g", `--registry=${release.registry}`, `${release.packages.pkg}@${release.version}`];
+	if ($env[FORK_NPM_WRAPPER_ENV] !== "1") {
+		console.log(chalk.yellow(`This ${APP_NAME} was not started by the ${FORK_PACKAGE} npm launcher.`));
+		console.log(`Install the update with: npm ${args.join(" ")}`);
+		console.log(`Or download it from: https://github.com/${FORK_REPO}/releases/tag/${release.tag}`);
+		return;
+	}
+	console.log(chalk.dim("Updating via npm..."));
+	const result = await $`npm ${args}`.nothrow();
+	if (result.exitCode !== 0) {
+		throw new Error(`npm install failed with exit code ${result.exitCode}`);
+	}
+	const verification = await verifyInstalledVersion(release.version);
+	if (verification.ok) {
+		printVerifiedVersion(release.version, verification.path);
+	} else {
+		console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(verification, release.version)}`));
+	}
+}
+
+/**
  * Run the update command.
  */
 export async function runUpdateCommand(opts: {
 	force: boolean;
 	check: boolean;
 	channel?: UpdateChannel;
+	/** Version of the running build; defaults to {@link VERSION}. */
+	currentVersion?: string;
 }): Promise<void> {
-	console.log(chalk.dim(`Current version: ${VERSION}`));
-	const persistedChannel = readPersistedChannel() ?? "stable";
+	const currentVersion = opts.currentVersion ?? VERSION;
+	const forkBuild = FORK_RELEASE_VERSION.test(currentVersion);
+	console.log(chalk.dim(`Current version: ${currentVersion}`));
+	if (forkBuild && opts.channel === "canary") {
+		console.error(chalk.red(`${FORK_PACKAGE} has no canary channel.`));
+		process.exit(1);
+	}
+	// A canary channel persisted by an upstream install does not apply to the fork.
+	const persistedChannel = forkBuild ? "stable" : (readPersistedChannel() ?? "stable");
 	const channel = opts.channel ?? persistedChannel;
 	const isChannelSwitch = opts.channel !== undefined && opts.channel !== persistedChannel;
 	if (channel === "canary") console.log(chalk.dim("Current channel: canary"));
@@ -2130,13 +2188,13 @@ export async function runUpdateCommand(opts: {
 	// Check for updates
 	let release: ReleaseInfo;
 	try {
-		release = await getLatestRelease({ channel });
+		release = await getLatestRelease({ channel, currentVersion });
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
 	}
 
-	const comparison = compareVersions(release.version, VERSION);
+	const comparison = compareVersions(release.version, currentVersion);
 
 	if (comparison <= 0 && !opts.force && !isChannelSwitch) {
 		const icon = theme?.status?.success ?? "✔";
@@ -2147,7 +2205,7 @@ export async function runUpdateCommand(opts: {
 	if (isChannelSwitch) {
 		console.log(
 			chalk.yellow(
-				`Switching to ${channel} ${release.version}${comparison <= 0 ? ` (downgrade from ${VERSION})` : ""}`,
+				`Switching to ${channel} ${release.version}${comparison <= 0 ? ` (downgrade from ${currentVersion})` : ""}`,
 			),
 		);
 	} else if (comparison > 0) {
@@ -2155,7 +2213,7 @@ export async function runUpdateCommand(opts: {
 	} else {
 		console.log(chalk.yellow(`Forcing reinstall of ${release.version}`));
 	}
-	if (release.packages.pkg !== PACKAGE) {
+	if (!forkBuild && release.packages.pkg !== PACKAGE) {
 		console.log(chalk.cyan(`The npm package moved to ${release.packages.pkg}; updating migrates this install.`));
 	}
 
@@ -2169,7 +2227,11 @@ export async function runUpdateCommand(opts: {
 	// symlink resolves to method "binary" and is replaced in place, keeping the
 	// same PATH entry live.
 	try {
-		const forceBinary = shouldForceBinaryUpdate(release);
+		if (forkBuild) {
+			await updateForkRelease(release);
+			return;
+		}
+		const forceBinary = shouldForceBinaryUpdate(release, currentVersion);
 		const allowPrerelease = channel === "canary";
 		const target = await resolveUpdateTarget({ allowPackageManagers: !forceBinary });
 		if (channel === "canary" && (target.method === "nix" || target.method === "brew" || target.method === "mise")) {

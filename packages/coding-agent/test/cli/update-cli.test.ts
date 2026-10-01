@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { fixedNpmRegistry } from "../../src/cli/npm-registry";
 import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
 
@@ -210,5 +210,64 @@ describe("getLatestRelease proxy errors", () => {
 		// Instead the user gets actionable guidance about supported proxy schemes.
 		expect(err?.message).toMatch(/SOCKS/i);
 		expect(err?.message).toMatch(/https?:\/\//i);
+	});
+});
+
+describe("taoeffect fork release builds", () => {
+	const FORK_VERSION = "18.4.9-taoeffect.1";
+	const NEXT_FORK_VERSION = "18.4.10-taoeffect.1";
+	const WRAPPER_ENV = "OMP_TAOEFFECTS_NPM_WRAPPER";
+	let savedWrapperEnv: string | undefined;
+
+	beforeEach(() => {
+		// The suite may run inside an omp started by the fork's npm launcher; that must not make it run npm.
+		savedWrapperEnv = process.env[WRAPPER_ENV];
+		delete process.env[WRAPPER_ENV];
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (savedWrapperEnv !== undefined) process.env[WRAPPER_ENV] = savedWrapperEnv;
+	});
+
+	function stubForkRegistry(): string[] {
+		const urls: string[] = [];
+		const fetchStub = Object.assign(
+			async (input: FetchInput) => {
+				const url = String(input);
+				urls.push(url);
+				if (!decodeURIComponent(url).includes("@taoeffects/omp")) {
+					return new Response(null, { status: 404, statusText: "Not Found" });
+				}
+				return Response.json({ name: "@taoeffects/omp", version: NEXT_FORK_VERSION });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+		return urls;
+	}
+
+	it("checks the latest @taoeffects/omp release instead of upstream, even on the canary channel", async () => {
+		const urls = stubForkRegistry();
+
+		const release = await getLatestRelease({ channel: "canary", registries: npmjs, currentVersion: FORK_VERSION });
+
+		expect(urls).toEqual(["https://registry.npmjs.org/@taoeffects%2fomp/latest"]);
+		expect(release.version).toBe(NEXT_FORK_VERSION);
+	});
+
+	it("prints the npm command instead of installing when the npm launcher did not start omp", async () => {
+		stubForkRegistry();
+		const output: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+			output.push(args.join(" "));
+		});
+		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			throw new Error(`process.exit(${code})`);
+		}) as typeof process.exit);
+
+		await runUpdateCommand({ force: false, check: false, currentVersion: FORK_VERSION });
+
+		expect(output.join("\n")).toMatch(/npm install -g --registry=\S+ @taoeffects\/omp@18\.4\.10-taoeffect\.1/);
 	});
 });
