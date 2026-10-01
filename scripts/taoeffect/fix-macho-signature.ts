@@ -198,8 +198,8 @@ export function removeCodeSignature(binary: Uint8Array): Uint8Array {
 		throw new Error("__LINKEDIT does not end with the code signature");
 	}
 
-	const stripped = binary.slice(0, dataOffset);
-	const header = new DataView(stripped.buffer);
+	const stripped = new Uint8Array(binary.subarray(0, dataOffset));
+	const header = new DataView(stripped.buffer, stripped.byteOffset, stripped.byteLength);
 	// vmsize stays as it is: a segment may map more memory than its file size.
 	header.setBigUint64(linkedit.offset + 48, BigInt(dataOffset - linkeditOffset), true);
 	stripped.copyWithin(command.offset, command.offset + command.size, layout.commandsEnd);

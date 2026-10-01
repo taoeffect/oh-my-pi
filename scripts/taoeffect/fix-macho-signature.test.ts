@@ -111,6 +111,19 @@ describe("fixDarwinSignature", () => {
 		expect(fixDarwinSignature(stripped).action).toBe("unsigned");
 	});
 
+	test("strips a Buffer view without writing to the caller's memory", () => {
+		const stale = withPatchedCode(signedMachO("x86_64"));
+		const backing = Buffer.alloc(stale.length + 8);
+		const input = backing.subarray(8);
+		input.set(stale);
+		const before = Buffer.from(backing);
+
+		const result = fixDarwinSignature(input);
+
+		expect(backing).toEqual(before);
+		expect(result.binary).toEqual(fixDarwinSignature(stale).binary);
+	});
+
 	test("keeps a valid arm64 ad-hoc signature byte for byte", () => {
 		const signed = signedMachO("arm64");
 
