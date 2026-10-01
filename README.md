@@ -55,14 +55,14 @@ Download `checksums.txt` and the archive for your platform from [GitHub Releases
 VERSION=18.4.9-taoeffect.1
 ARCHIVE="omp_${VERSION}_Darwin_arm64"
 
-# Check the archive. On Linux, use `sha256sum -c` instead of `shasum -a 256 -c`.
-grep " ${ARCHIVE}.tar.gz\$" checksums.txt | shasum -a 256 -c
+# Check the archive, then install it. A failed check stops the install.
+# On Linux, use `sha256sum -c` instead of `shasum -a 256 -c`.
+grep " ${ARCHIVE}.tar.gz\$" checksums.txt | shasum -a 256 -c &&
+  tar -xzf "${ARCHIVE}.tar.gz" &&
+  mkdir -p ~/.local/bin &&
+  install -m 0755 "${ARCHIVE}/omp" ~/.local/bin/omp
 
-tar -xzf "${ARCHIVE}.tar.gz"
-mkdir -p ~/.local/bin
-install -m 0755 "${ARCHIVE}/omp" ~/.local/bin/omp
-
-# macOS only, after the checksum check passes: remove the quarantine attribute.
+# macOS only: remove the quarantine attribute from the installed binary.
 xattr -d com.apple.quarantine ~/.local/bin/omp 2>/dev/null || true
 ```
 
