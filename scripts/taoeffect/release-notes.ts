@@ -38,9 +38,10 @@ ZAI_API_KEY and RELEASE_MODEL, a clone with the full history and tags, and an
 authenticated gh for the GitHub release lookup in --repo (default: ${FORK_REPOSITORY}).
 
 The previous release is the newest GitHub release of --repo whose tag is an
-ancestor of <tag>, else the newest merged v*-taoeffect.* tag. Commits that the
-upstream base tag v<upstream> contains are left out; the script fetches that
-tag from ${UPSTREAM_REPOSITORY} when the clone lacks it.`;
+ancestor of <tag>; with none, the notes cover everything since the upstream base.
+Only when gh cannot list the releases, the newest merged v*-taoeffect.* tag is
+used instead. Commits that the upstream base tag v<upstream> contains are left
+out; the script fetches that tag from ${UPSTREAM_REPOSITORY} when the clone lacks it.`;
 
 export interface CommitLog {
 	text: string;
@@ -176,17 +177,17 @@ async function findPreviousRelease(tag: string, repo: string): Promise<string | 
 		.quiet()
 		.nothrow();
 	const releases = releaseList.exitCode === 0 ? GitHubReleaseList(releaseList.json()) : undefined;
-	if (releases === undefined || releases instanceof type.errors) {
-		const reason = releases?.summary ?? releaseList.stderr.toString().trim();
-		console.error(`Could not list the GitHub releases of ${repo}; using merged tags instead. ${reason}`);
-	} else {
+	if (releases !== undefined && !(releases instanceof type.errors)) {
 		for (const { tagName } of releases) {
 			if (tagName === tag || !isForkReleaseTag(tagName) || !(await hasTag(tagName))) continue;
 			const ancestor = await git(["merge-base", "--is-ancestor", `refs/tags/${tagName}`, `refs/tags/${tag}`]);
 			if (ancestor.exitCode === 0) return tagName;
 		}
+		return undefined;
 	}
 
+	const reason = releases?.summary ?? releaseList.stderr.toString().trim();
+	console.error(`Could not list the GitHub releases of ${repo}; using merged tags instead. ${reason}`);
 	const mergedTags = await gitText([
 		"tag",
 		"--merged",
