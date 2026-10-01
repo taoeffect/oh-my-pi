@@ -36,7 +36,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 ### Tao Effect fork (`@taoeffects/omp`)
 
-This repository is the Tao Effect fork of omp. Install the fork from npm. It needs Node.js 20 or later and runs on macOS and Linux (x64 and arm64):
+This repository is the Tao Effect fork of omp. It runs on macOS and on glibc-based Linux, on x64 and arm64. Alpine and other musl-based Linux systems are not supported. Install the fork from npm. It needs Node.js 20 or later:
 
 ```sh
 # --allow-scripts lets npm download the omp binary during the install
