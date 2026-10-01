@@ -7,6 +7,29 @@ const npmjs = fixedNpmRegistry();
 type FetchInput = string | URL | Request;
 type FetchInit = RequestInit | BunFetchRequestInit;
 
+function stubRegistry(manifests: Record<string, unknown>): string[] {
+	const urls: string[] = [];
+	const fetchStub = Object.assign(
+		async (input: FetchInput) => {
+			const url = String(input);
+			urls.push(url);
+			const decoded = decodeURIComponent(url);
+			let manifest: unknown;
+			for (const pkg in manifests) {
+				if (decoded.includes(pkg)) {
+					manifest = manifests[pkg];
+					break;
+				}
+			}
+			if (!manifest) return new Response(null, { status: 404, statusText: "Not Found" });
+			return Response.json(manifest);
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	);
+	vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+	return urls;
+}
+
 describe("runUpdateCommand fetch cancellation", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -34,29 +57,6 @@ describe("getLatestRelease rename pointers", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
-
-	function stubRegistry(manifests: Record<string, unknown>): string[] {
-		const urls: string[] = [];
-		const fetchStub = Object.assign(
-			async (input: FetchInput) => {
-				const url = String(input);
-				urls.push(url);
-				const decoded = decodeURIComponent(url);
-				let manifest: unknown;
-				for (const pkg in manifests) {
-					if (decoded.includes(pkg)) {
-						manifest = manifests[pkg];
-						break;
-					}
-				}
-				if (!manifest) return new Response(null, { status: 404, statusText: "Not Found" });
-				return Response.json(manifest);
-			},
-			{ preconnect: globalThis.fetch.preconnect },
-		);
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
-		return urls;
-	}
 
 	it("follows omp.rename to the new package and resolves version, dist, and names from its manifest", async () => {
 		const urls = stubRegistry({
@@ -230,25 +230,8 @@ describe("taoeffect fork release builds", () => {
 		else process.env[WRAPPER_ENV] = savedWrapperEnv;
 	});
 
-	function stubForkRegistry(): string[] {
-		const urls: string[] = [];
-		const fetchStub = Object.assign(
-			async (input: FetchInput) => {
-				const url = String(input);
-				urls.push(url);
-				if (!decodeURIComponent(url).includes("@taoeffects/omp")) {
-					return new Response(null, { status: 404, statusText: "Not Found" });
-				}
-				return Response.json({ name: "@taoeffects/omp", version: NEXT_FORK_VERSION });
-			},
-			{ preconnect: globalThis.fetch.preconnect },
-		);
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
-		return urls;
-	}
-
 	it("checks the latest @taoeffects/omp release instead of upstream, even on the canary channel", async () => {
-		const urls = stubForkRegistry();
+		const urls = stubRegistry({ "@taoeffects/omp": { name: "@taoeffects/omp", version: NEXT_FORK_VERSION } });
 
 		const release = await getLatestRelease({ channel: "canary", registries: npmjs, currentVersion: FORK_VERSION });
 
@@ -260,7 +243,7 @@ describe("taoeffect fork release builds", () => {
 		// The launcher sets its own pid for the omp it starts. A process started by that omp inherits
 		// the marker, but its parent is not the launcher.
 		process.env[WRAPPER_ENV] = String(process.pid);
-		stubForkRegistry();
+		stubRegistry({ "@taoeffects/omp": { name: "@taoeffects/omp", version: NEXT_FORK_VERSION } });
 		const output: string[] = [];
 		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
 			output.push(args.join(" "));
