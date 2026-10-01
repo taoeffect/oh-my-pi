@@ -12,10 +12,10 @@ export const FORK_REPOSITORY = "taoeffect/oh-my-pi";
  * the upstream native leaf tag (`@oh-my-pi/pi-natives-<key>`).
  */
 export const RELEASE_TARGETS = [
-	{ key: "linux-x64", platform: "linux", arch: "x64", archiveSuffix: "Linux_x86_64" },
-	{ key: "linux-arm64", platform: "linux", arch: "arm64", archiveSuffix: "Linux_arm64" },
-	{ key: "darwin-x64", platform: "darwin", arch: "x64", archiveSuffix: "Darwin_x86_64" },
-	{ key: "darwin-arm64", platform: "darwin", arch: "arm64", archiveSuffix: "Darwin_arm64" },
+	{ key: "linux-x64", arch: "x64", archiveSuffix: "Linux_x86_64" },
+	{ key: "linux-arm64", arch: "arm64", archiveSuffix: "Linux_arm64" },
+	{ key: "darwin-x64", arch: "x64", archiveSuffix: "Darwin_x86_64" },
+	{ key: "darwin-arm64", arch: "arm64", archiveSuffix: "Darwin_arm64" },
 ] as const;
 
 export type ReleaseTarget = (typeof RELEASE_TARGETS)[number];
