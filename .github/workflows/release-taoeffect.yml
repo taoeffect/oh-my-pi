@@ -1,0 +1,360 @@
+# Release pipeline for the taoeffect fork (@taoeffects/omp). Started by the tag
+# that scripts/taoeffect/bump-version-and-release.ts pushes. Builds unsigned
+# Linux and macOS binaries, attaches them to a GitHub Release, and publishes
+# the npm wrapper from npm/ through npm trusted publishing.
+name: release-taoeffect
+
+on:
+   push:
+      # Only fork tags (v<upstream>-taoeffect.<n>), so upstream v* tags pushed to
+      # the fork never start a release.
+      tags:
+         - "v*-taoeffect.*"
+   workflow_dispatch:
+      inputs:
+         tag:
+            description: Existing fork release tag to build, such as v18.4.9-taoeffect.1
+            required: true
+            type: string
+
+permissions:
+   contents: read
+
+concurrency:
+   group: release-taoeffect-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+   cancel-in-progress: false
+
+env:
+   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+   # Same per-test ceiling as upstream ci.yml (seconds).
+   OMP_TEST_TIMEOUT: "120"
+
+defaults:
+   run:
+      shell: bash
+
+jobs:
+   metadata:
+      name: Resolve release metadata
+      runs-on: ubuntu-24.04
+      outputs:
+         tag: ${{ steps.tag.outputs.tag }}
+         version: ${{ steps.tag.outputs.version }}
+      steps:
+         - name: Resolve release tag
+           id: tag
+           env:
+              DISPATCH_TAG: ${{ inputs.tag }}
+           run: |
+              if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+                tag="$DISPATCH_TAG"
+              else
+                tag="$GITHUB_REF_NAME"
+              fi
+              if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-taoeffect\.[1-9][0-9]*$ ]]; then
+                echo "::error::Invalid fork release tag '$tag'; expected v<upstream>-taoeffect.<n> with n >= 1"
+                exit 1
+              fi
+              {
+                echo "tag=$tag"
+                echo "version=${tag#v}"
+              } >> "$GITHUB_OUTPUT"
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              persist-credentials: false
+              ref: refs/tags/${{ steps.tag.outputs.tag }}
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+         # Fails unless npm/package.json carries this version and its upstream
+         # base equals the merged upstream version (packages/natives/package.json),
+         # which is the natives version the build legs download.
+         - name: Check release version
+           env:
+              VERSION: ${{ steps.tag.outputs.version }}
+           run: bun scripts/taoeffect/prepare-release.ts --check "$VERSION"
+
+   check:
+      name: Lint and type check
+      needs: metadata
+      runs-on: ubuntu-24.04
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              persist-credentials: false
+              ref: refs/tags/${{ needs.metadata.outputs.tag }}
+         - uses: ./.github/actions/bun-install
+         - name: Type check workspace
+           run: bun run check:ts
+         - name: Test fork release scripts
+           run: bun test scripts/taoeffect
+
+   # The upstream TypeScript suite (`bun run ci:test:ts`), split into the same
+   # buckets and concurrency limits that upstream ci.yml uses on GitHub-hosted
+   # pull request runners.
+   test:
+      name: Test ${{ matrix.bucket }} ${{ matrix.shard }}
+      needs: metadata
+      runs-on: ubuntu-24.04
+      timeout-minutes: 30
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { bucket: workspace, concurrency: "4", shard: "" }
+               - { bucket: native, concurrency: "4", shard: "" }
+               - { bucket: coding-agent-singleton, concurrency: "", shard: "" }
+               - { bucket: coding-agent-ui, concurrency: "2", shard: "" }
+               - { bucket: coding-agent-runtime, concurrency: "4", shard: "" }
+               - { bucket: coding-agent-native, concurrency: "4", shard: "1/3" }
+               - { bucket: coding-agent-native, concurrency: "4", shard: "2/3" }
+               - { bucket: coding-agent-native, concurrency: "4", shard: "3/3" }
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              persist-credentials: false
+              ref: refs/tags/${{ needs.metadata.outputs.tag }}
+         - uses: ./.github/actions/bun-install
+         - name: Install upstream native addons
+           run: bun scripts/taoeffect/fetch-upstream-natives.ts linux-x64
+         - name: Run test bucket
+           env:
+              TEST_BUCKET: ${{ matrix.bucket }}
+              OMP_TEST_CONCURRENCY: ${{ matrix.concurrency }}
+              OMP_TEST_SHARD: ${{ matrix.shard }}
+           run: bun scripts/ci-test-ts.ts "$TEST_BUCKET"
+
+   # Every leg builds on Linux. On a Linux host ci-release-build-binaries.ts runs
+   # no codesign, so the darwin binaries keep only the ad-hoc linker signature
+   # that Bun writes (Apple Silicon refuses arm64 binaries with no signature).
+   # The fork ships no Developer ID signing or notarization, like the Crush fork.
+   build:
+      name: Build ${{ matrix.target }}
+      needs: metadata
+      runs-on: ${{ matrix.os }}
+      timeout-minutes: 30
+      strategy:
+         fail-fast: false
+         matrix:
+            # archive_suffix must match RELEASE_TARGETS in scripts/taoeffect/release-layout.ts;
+            # generate-npm-package.ts in the release job fails on a mismatch.
+            include:
+               - { target: linux-x64, os: ubuntu-24.04, archive_suffix: Linux_x86_64 }
+               - { target: linux-arm64, os: ubuntu-24.04-arm, archive_suffix: Linux_arm64 }
+               - { target: darwin-x64, os: ubuntu-24.04, archive_suffix: Darwin_x86_64 }
+               - { target: darwin-arm64, os: ubuntu-24.04, archive_suffix: Darwin_arm64 }
+      env:
+         VERSION: ${{ needs.metadata.outputs.version }}
+         TARGET: ${{ matrix.target }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              persist-credentials: false
+              ref: refs/tags/${{ needs.metadata.outputs.tag }}
+         - uses: ./.github/actions/bun-install
+         - name: Install upstream native addons
+           run: bun scripts/taoeffect/fetch-upstream-natives.ts "$TARGET"
+         # omp --version prints the utils/coding-agent package version, so stamp
+         # the fork version into this checkout only. The natives version stays
+         # upstream so the embedded addon still passes its version check.
+         - name: Set build version
+           run: bun scripts/taoeffect/set-build-version.ts "$VERSION"
+         - name: Build release binary
+           env:
+              RELEASE_TARGETS: ${{ matrix.target }}
+           run: bun run ci:release:build-binaries
+         - name: Create release archive
+           env:
+              ARCHIVE_SUFFIX: ${{ matrix.archive_suffix }}
+           run: |
+              archive="omp_${VERSION}_${ARCHIVE_SUFFIX}"
+              stage="$RUNNER_TEMP/stage"
+              mkdir -p "$stage/$archive" dist
+              install -m 0755 "packages/coding-agent/binaries/omp-$TARGET" "$stage/$archive/omp"
+              install -m 0644 README.md LICENSE THIRD-PARTY-NOTICES.txt "$stage/$archive/"
+              tar -C "$stage" -czf "dist/$archive.tar.gz" "$archive"
+         - name: Upload release archive
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: omp-archive-${{ matrix.target }}
+              path: dist/*.tar.gz
+              if-no-files-found: error
+              retention-days: 7
+
+   # Runs each archive on its own OS and CPU. Both darwin archives run on Apple
+   # silicon macos-15: x64 runs under Rosetta, and only macOS 15's Rosetta
+   # translates the AVX2 that the bun-darwin-x64 runtime uses. This job only
+   # runs the binaries; it never signs them.
+   smoke:
+      name: Smoke ${{ matrix.target }}
+      needs: [metadata, build]
+      runs-on: ${{ matrix.os }}
+      timeout-minutes: 15
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { target: linux-x64, os: ubuntu-24.04 }
+               - { target: linux-arm64, os: ubuntu-24.04-arm }
+               - { target: darwin-x64, os: macos-15 }
+               - { target: darwin-arm64, os: macos-15 }
+      env:
+         VERSION: ${{ needs.metadata.outputs.version }}
+      steps:
+         - name: Download release archive
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: omp-archive-${{ matrix.target }}
+              path: ${{ runner.temp }}/archive
+         - name: Smoke release archive
+           run: |
+              archives=("$RUNNER_TEMP"/archive/*.tar.gz)
+              if [ "${#archives[@]}" -ne 1 ] || [ ! -f "${archives[0]}" ]; then
+                echo "::error::Expected exactly one release archive, found: ${archives[*]}"
+                exit 1
+              fi
+              name="$(basename "${archives[0]}" .tar.gz)"
+              work="$RUNNER_TEMP/smoke"
+              mkdir -p "$work/extract" "$work/home" "$work/xdg"
+              tar -xzf "${archives[0]}" -C "$work/extract"
+              for file in omp README.md LICENSE THIRD-PARTY-NOTICES.txt; do
+                if [ ! -f "$work/extract/$name/$file" ]; then
+                  echo "::error::$name.tar.gz has no $name/$file"
+                  exit 1
+                fi
+              done
+              binary="$work/extract/$name/omp"
+              reported="$(HOME="$work/home" XDG_DATA_HOME="$work/xdg" "$binary" --version)"
+              if [ "$reported" != "omp/$VERSION" ]; then
+                echo "::error::$name/omp --version printed '$reported', expected 'omp/$VERSION'"
+                exit 1
+              fi
+              HOME="$work/home" XDG_DATA_HOME="$work/xdg" "$binary" --smoke-test
+
+   release:
+      name: Publish GitHub Release and npm package
+      needs: [metadata, check, test, build, smoke]
+      runs-on: ubuntu-24.04
+      timeout-minutes: 30
+      # contents: write creates the GitHub Release; id-token: write lets npm get
+      # the GitHub OIDC token for trusted publishing (no npm token secret).
+      permissions:
+         contents: write
+         id-token: write
+      env:
+         TAG: ${{ needs.metadata.outputs.tag }}
+         VERSION: ${{ needs.metadata.outputs.version }}
+      steps:
+         # Full history and tags: release-notes.ts finds the previous fork release
+         # and reads the commits since then.
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              persist-credentials: false
+              ref: refs/tags/${{ needs.metadata.outputs.tag }}
+              fetch-depth: 0
+         - uses: ./.github/actions/bun-install
+         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           with:
+              node-version: "24"
+         - name: Download release archives
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: omp-archive-*
+              path: dist
+              merge-multiple: true
+         - name: Generate checksums
+           working-directory: dist
+           run: |
+              sha256sum -- *.tar.gz > checksums.txt
+              cat checksums.txt
+         # Runs before anything is published: it fails unless checksums.txt lists
+         # the archive of every release target under its expected name.
+         - name: Generate npm package
+           run: >-
+              bun scripts/taoeffect/generate-npm-package.ts
+              --version "$VERSION"
+              --repo "$GITHUB_REPOSITORY"
+              --dist dist
+              --out .release/npm-package
+         - name: Pack npm package
+           id: pack
+           run: |
+              filename="$(npm pack ./.release/npm-package --pack-destination .release --json | jq -r '.[0].filename')"
+              echo "tgz=.release/$filename" >> "$GITHUB_OUTPUT"
+         # Kept as a workflow artifact for the first publish, which must be done
+         # by hand: npm trusted publishing can only be set up for a package that
+         # already exists.
+         - name: Upload npm package
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: npm-package
+              path: ${{ steps.pack.outputs.tgz }}
+              if-no-files-found: error
+         - name: Generate release notes
+           env:
+              GH_TOKEN: ${{ github.token }}
+              ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+              RELEASE_MODEL: ${{ vars.RELEASE_MODEL }}
+           run: bun scripts/taoeffect/release-notes.ts "$TAG" --repo "$GITHUB_REPOSITORY" --out dist/release-notes.md
+         - name: Create or update GitHub Release
+           env:
+              GH_TOKEN: ${{ github.token }}
+           run: |
+              if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file dist/release-notes.md
+                gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt --repo "$GITHUB_REPOSITORY" --clobber
+              else
+                gh release create "$TAG" dist/*.tar.gz dist/checksums.txt \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --title "$TAG" \
+                  --notes-file dist/release-notes.md \
+                  --verify-tag
+              fi
+         # Installs the packed wrapper the way users do, so it downloads the
+         # archives from the GitHub Release created above. The second install
+         # skips install scripts to cover the first-run download in the bin shim.
+         # A tarball does not match --allow-scripts=<name> (npm matches the
+         # resolved file path), so the first install allows all scripts.
+         - name: Check npm package install
+           env:
+              TGZ: ${{ steps.pack.outputs.tgz }}
+           run: |
+              tgz="$PWD/$TGZ"
+              check_version() {
+                local shim="$1" runtime="$2" reported
+                mkdir -p "$runtime/home" "$runtime/xdg" "$runtime/cache"
+                reported="$(HOME="$runtime/home" XDG_DATA_HOME="$runtime/xdg" XDG_CACHE_HOME="$runtime/cache" "$shim" --version)"
+                if [ "$reported" != "omp/$VERSION" ]; then
+                  echo "::error::$shim --version printed '$reported', expected 'omp/$VERSION'"
+                  exit 1
+                fi
+              }
+
+              with_scripts="$RUNNER_TEMP/npm-with-scripts"
+              npm install -g --prefix "$with_scripts" --dangerously-allow-all-scripts "$tgz"
+              if [ ! -x "$with_scripts/lib/node_modules/@taoeffects/omp/vendor/omp/omp" ]; then
+                echo "::error::postinstall did not install the omp binary"
+                exit 1
+              fi
+              check_version "$with_scripts/bin/omp" "$RUNNER_TEMP/runtime-with-scripts"
+
+              without_scripts="$RUNNER_TEMP/npm-without-scripts"
+              npm install -g --prefix "$without_scripts" --ignore-scripts "$tgz"
+              if [ -e "$without_scripts/lib/node_modules/@taoeffects/omp/vendor/omp/omp" ]; then
+                echo "::error::the omp binary exists although install scripts were skipped"
+                exit 1
+              fi
+              check_version "$without_scripts/bin/omp" "$RUNNER_TEMP/runtime-without-scripts"
+         # npm needs --tag latest to publish a prerelease version. A rerun skips
+         # a version that is already on npm.
+         - name: Publish npm package
+           env:
+              TGZ: ${{ steps.pack.outputs.tgz }}
+           run: |
+              if published="$(npm view "@taoeffects/omp@$VERSION" version 2>/dev/null)" && [ "$published" = "$VERSION" ]; then
+                echo "@taoeffects/omp@$VERSION is already on npm; skipping publish."
+                exit 0
+              fi
+              if ! npm publish "$TGZ" --access public --tag latest; then
+                echo "::error::npm publish failed. For the first release, publish the npm-package artifact of this run by hand, set up npm trusted publishing for this workflow, then rerun."
+                exit 1
+              fi
