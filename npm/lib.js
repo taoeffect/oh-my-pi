@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, rmSync } from "node:fs";
 import { access, chmod, constants, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
@@ -21,6 +21,8 @@ const PLATFORM_KEYS = new Map([
 const PATH_SEGMENT = /^[\w.+-]+$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 const PERMISSION_ERROR_CODES = new Set(["EACCES", "EPERM", "EROFS"]);
+// The signals that a terminal or a process manager sends. Each one ends Node by default.
+const INTERRUPT_SIGNALS = ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"];
 
 function platformKey() {
 	const key = PLATFORM_KEYS.get(`${process.platform}:${process.arch}`);
@@ -92,6 +94,7 @@ export async function downloadBinary(packageJson, { log = () => {} } = {}) {
 		workDir = await createWorkDir(destination);
 	}
 
+	const stopRemovingOnSignal = removeOnSignal(workDir);
 	try {
 		log(`Downloading omp ${packageJson.version} for ${key} from ${archive.url}`);
 		const archivePath = join(workDir, archive.name);
@@ -100,7 +103,8 @@ export async function downloadBinary(packageJson, { log = () => {} } = {}) {
 		// Rename within one directory is atomic, so concurrent first runs never see a partial binary.
 		await rename(extracted, destination);
 	} finally {
-		await rm(workDir, { recursive: true, force: true });
+		// Keep the signal handlers until `rm` ends, so a signal during `rm` still removes the folder.
+		await rm(workDir, { recursive: true, force: true }).finally(stopRemovingOnSignal);
 	}
 
 	if (destination !== vendorBinaryPath) await pruneOtherCachedVersions(packageJson.version);
@@ -111,6 +115,24 @@ async function createWorkDir(destination) {
 	const directory = dirname(destination);
 	await mkdir(directory, { recursive: true });
 	return mkdtemp(join(directory, ".download-"));
+}
+
+/**
+ * A signal ends Node without running `finally` blocks, so an interrupted download would leave its
+ * partial archive behind. Until the returned function runs, the signals in `INTERRUPT_SIGNALS`
+ * remove `directory` and then end the process with the same signal.
+ */
+function removeOnSignal(directory) {
+	const handler = signal => {
+		stop();
+		rmSync(directory, { recursive: true, force: true });
+		process.kill(process.pid, signal);
+	};
+	const stop = () => {
+		for (const signal of INTERRUPT_SIGNALS) process.off(signal, handler);
+	};
+	for (const signal of INTERRUPT_SIGNALS) process.on(signal, handler);
+	return stop;
 }
 
 async function downloadVerified(archive, archivePath) {
