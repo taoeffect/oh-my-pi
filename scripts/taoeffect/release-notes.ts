@@ -236,7 +236,8 @@ export async function generateReleaseNotes({ tag, repo, apiKey, model }: Release
 
 	const { system, user } = renderReleaseNotesPrompt({
 		tag,
-		previous: previous ?? `upstream oh-my-pi ${upstreamTag}`,
+		previous,
+		upstreamTag,
 		commits: commits.text,
 		omitted: commits.omitted,
 	});

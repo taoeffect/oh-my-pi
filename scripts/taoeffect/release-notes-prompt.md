@@ -7,7 +7,7 @@ You write concise GitHub release notes from git commit messages.
 - Do not include code fences, introductions, conclusions, or empty sections.
 - If there are no important changes, return an empty string.
 <!-- USER -->
-Summarize important changes in {{tag}} since {{previous}}.
+Summarize important changes in {{tag}} since {{#if previous}}{{previous}}{{else}}upstream oh-my-pi {{upstreamTag}}{{/if}}.
 
 Commit messages:
 {{commits}}
