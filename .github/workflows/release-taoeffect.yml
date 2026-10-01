@@ -303,13 +303,42 @@ jobs:
               ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
               RELEASE_MODEL: ${{ vars.RELEASE_MODEL }}
            run: bun scripts/taoeffect/release-notes.ts "$TAG" --repo "$GITHUB_REPOSITORY" --out dist/release-notes.md
+         # A rerun of all jobs rebuilds every archive, and a rebuilt archive gets
+         # a new SHA-256. A published npm version cannot change, and its package
+         # holds the checksums of the archives on the release. So when this
+         # version is already on npm, keep those archives and skip the install
+         # check and the publish (this run's package matches only its own
+         # archives). Only a 404 means "not published"; any other npm error stops
+         # the job before it can replace an archive.
+         - name: Check npm publication
+           id: npm
+           run: |
+              view="$(npm view "@taoeffects/omp@$VERSION" version --json 2>/dev/null)" || true
+              if [ "$(jq -r 'strings' <<<"$view")" = "$VERSION" ]; then
+                published=true
+              elif [ "$(jq -r '.error.code? // empty' <<<"$view")" = E404 ]; then
+                published=false
+              else
+                echo "$view"
+                echo "::error::npm view could not tell whether @taoeffects/omp@$VERSION is published."
+                exit 1
+              fi
+              echo "published=$published" >> "$GITHUB_OUTPUT"
          - name: Create or update GitHub Release
            env:
               GH_TOKEN: ${{ github.token }}
+              NPM_PUBLISHED: ${{ steps.npm.outputs.published }}
            run: |
               if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
                 gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file dist/release-notes.md
-                gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt --repo "$GITHUB_REPOSITORY" --clobber
+                if [ "$NPM_PUBLISHED" = true ]; then
+                  echo "::notice::@taoeffects/omp@$VERSION is on npm; kept the release archives that its checksums point to."
+                else
+                  gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt --repo "$GITHUB_REPOSITORY" --clobber
+                fi
+              elif [ "$NPM_PUBLISHED" = true ]; then
+                echo "::error::@taoeffects/omp@$VERSION is on npm, but release $TAG is missing. The archives of this run do not match the checksums of the published package."
+                exit 1
               else
                 gh release create "$TAG" dist/*.tar.gz dist/checksums.txt \
                   --repo "$GITHUB_REPOSITORY" \
@@ -323,6 +352,7 @@ jobs:
          # A tarball does not match --allow-scripts=<name> (npm matches the
          # resolved file path), so the first install allows all scripts.
          - name: Check npm package install
+           if: steps.npm.outputs.published != 'true'
            env:
               TGZ: ${{ steps.pack.outputs.tgz }}
            run: |
@@ -352,16 +382,12 @@ jobs:
                 exit 1
               fi
               check_version "$without_scripts/bin/omp" "$RUNNER_TEMP/runtime-without-scripts"
-         # npm needs --tag latest to publish a prerelease version. A rerun skips
-         # a version that is already on npm.
+         # npm needs --tag latest to publish a prerelease version.
          - name: Publish npm package
+           if: steps.npm.outputs.published != 'true'
            env:
               TGZ: ${{ steps.pack.outputs.tgz }}
            run: |
-              if published="$(npm view "@taoeffects/omp@$VERSION" version 2>/dev/null)" && [ "$published" = "$VERSION" ]; then
-                echo "@taoeffects/omp@$VERSION is already on npm; skipping publish."
-                exit 0
-              fi
               if ! npm publish "$TGZ" --access public --tag latest; then
                 echo "::error::npm publish failed. For the first release, publish the npm-package artifact of this run by hand, set up npm trusted publishing for this workflow, then rerun."
                 exit 1
