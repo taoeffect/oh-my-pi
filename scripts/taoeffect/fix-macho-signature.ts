@@ -26,7 +26,7 @@ export type SignatureInspection =
 	| { cpu: DarwinCpu; status: "invalid"; problem: string };
 
 export type SignatureFix =
-	| { action: "kept" | "unsigned"; cpu: DarwinCpu; binary: Uint8Array }
+	| { action: "kept" | "already-unsigned"; cpu: DarwinCpu; binary: Uint8Array }
 	| { action: "removed"; cpu: DarwinCpu; problem: string; binary: Uint8Array };
 
 const MH_MAGIC_64 = 0xfeedfacf;
@@ -221,7 +221,7 @@ export function fixDarwinSignature(binary: Uint8Array): SignatureFix {
 				: `the arm64 binary has an invalid code signature (${inspection.problem}); macOS kills it at launch`,
 		);
 	}
-	if (inspection.status === "unsigned") return { action: "unsigned", cpu, binary };
+	if (inspection.status === "unsigned") return { action: "already-unsigned", cpu, binary };
 	return { action: "removed", cpu, problem: inspection.problem, binary: removeCodeSignature(binary) };
 }
 

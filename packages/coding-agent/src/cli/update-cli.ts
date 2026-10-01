@@ -53,7 +53,7 @@ const FORK_REPO = "taoeffect/oh-my-pi";
 const FORK_NPM_WRAPPER_ENV = "OMP_TAOEFFECTS_NPM_WRAPPER";
 
 /** Only fork CI release builds carry an `X.Y.Z-taoeffect.N` version; source and dev runs do not. */
-const FORK_RELEASE_VERSION = /-taoeffect\.\d+$/;
+const FORK_RELEASE_VERSION_PATTERN = /-taoeffect\.\d+$/;
 
 /**
  * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
@@ -896,7 +896,7 @@ async function fetchLatestManifest(
  * ({@link loadNpmRegistryResolver}), so a configured feed is honored for every
  * install method, including standalone binaries.
  *
- * A fork release build (`currentVersion` matches {@link FORK_RELEASE_VERSION})
+ * A fork release build (`currentVersion` matches {@link FORK_RELEASE_VERSION_PATTERN})
  * checks the `latest` dist-tag of {@link FORK_PACKAGE} instead; the fork has no
  * canary channel.
  */
@@ -909,7 +909,7 @@ export async function getLatestRelease(
 	} = {},
 ): Promise<ReleaseInfo> {
 	const timeoutMs = options.timeoutMs ?? RELEASE_METADATA_TIMEOUT_MS;
-	const forkBuild = FORK_RELEASE_VERSION.test(options.currentVersion ?? VERSION);
+	const forkBuild = FORK_RELEASE_VERSION_PATTERN.test(options.currentVersion ?? VERSION);
 	const channel = forkBuild ? "stable" : (options.channel ?? "stable");
 	const registries = options.registries ?? (await loadNpmRegistryResolver());
 	const packages: ReleasePackages = { ...CURRENT_PACKAGES };
@@ -2176,7 +2176,7 @@ export async function runUpdateCommand(opts: {
 	currentVersion?: string;
 }): Promise<void> {
 	const currentVersion = opts.currentVersion ?? VERSION;
-	const forkBuild = FORK_RELEASE_VERSION.test(currentVersion);
+	const forkBuild = FORK_RELEASE_VERSION_PATTERN.test(currentVersion);
 	console.log(chalk.dim(`Current version: ${currentVersion}`));
 	if (forkBuild && opts.channel === "canary") {
 		console.error(chalk.red(`${FORK_PACKAGE} has no canary channel.`));

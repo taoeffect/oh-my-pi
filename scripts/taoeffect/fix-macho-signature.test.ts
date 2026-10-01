@@ -108,7 +108,7 @@ describe("fixDarwinSignature", () => {
 		expect(view.getBigUint64(32 + SEGMENT_COMMAND_SIZE + 48, true)).toBe(BigInt(CODE_SIZE - LINKEDIT_OFFSET));
 		expect(stripped.subarray(COMMANDS_END)).toEqual(stale.subarray(COMMANDS_END, CODE_SIZE));
 		expect(inspectCodeSignature(stripped)).toEqual({ cpu: "x86_64", status: "unsigned" });
-		expect(fixDarwinSignature(stripped).action).toBe("unsigned");
+		expect(fixDarwinSignature(stripped).action).toBe("already-unsigned");
 	});
 
 	test("strips a Buffer view without writing to the caller's memory", () => {
