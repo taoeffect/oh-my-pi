@@ -66,6 +66,8 @@ grep " ${ARCHIVE}.tar.gz\$" checksums.txt | shasum -a 256 -c &&
 xattr -d com.apple.quarantine ~/.local/bin/omp 2>/dev/null || true
 ```
 
+If your shell cannot find `omp`, `~/.local/bin` is not on your `PATH`. macOS does not add it by default. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (for example `~/.zshrc` on macOS), then open a new terminal.
+
 The macOS binaries are not signed with an Apple Developer ID and are not notarized. Files that npm downloads get no quarantine attribute, so an npm install needs no extra step. A browser can quarantine the archive, and Finder's Archive Utility copies the attribute to the files it extracts. macOS does not run a quarantined unsigned binary. The `xattr` command removes the attribute and does nothing when it is not set.
 
 A manually installed `omp` does not replace itself. For a new release, `omp update` prints the npm command and the release URL.
