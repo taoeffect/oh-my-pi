@@ -26,7 +26,9 @@ async function resolveBinary() {
 function run(binary) {
 	const child = spawn(binary, process.argv.slice(2), {
 		stdio: "inherit",
-		env: { ...process.env, OMP_TAOEFFECTS_NPM_WRAPPER: "1" },
+		// omp runs `npm install -g` on update only when this equals its parent pid. Processes that omp
+		// starts inherit the variable, but their parent is not this launcher.
+		env: { ...process.env, OMP_TAOEFFECTS_NPM_WRAPPER: String(process.pid) },
 	});
 
 	const handlers = new Map();

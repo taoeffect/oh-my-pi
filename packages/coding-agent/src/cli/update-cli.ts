@@ -46,7 +46,10 @@ const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
  */
 const FORK_PACKAGE = "@taoeffects/omp";
 const FORK_REPO = "taoeffect/oh-my-pi";
-/** Set by the {@link FORK_PACKAGE} launcher (`npm/run-omp.js`) for the omp process it starts. */
+/**
+ * The {@link FORK_PACKAGE} launcher (`npm/run-omp.js`) sets this to its own pid for the omp process
+ * it starts. Processes that omp starts inherit it, so it counts only when it names the parent process.
+ */
 const FORK_NPM_WRAPPER_ENV = "OMP_TAOEFFECTS_NPM_WRAPPER";
 
 /** Only fork CI release builds carry an `X.Y.Z-taoeffect.N` version; source and dev runs do not. */
@@ -2143,7 +2146,7 @@ function persistChannel(channel: UpdateChannel): void {
  */
 async function updateForkRelease(release: ReleaseInfo): Promise<void> {
 	const args = ["install", "-g", `--registry=${release.registry}`, `${release.packages.pkg}@${release.version}`];
-	if ($env[FORK_NPM_WRAPPER_ENV] !== "1") {
+	if ($env[FORK_NPM_WRAPPER_ENV] !== String(process.ppid)) {
 		console.log(chalk.yellow(`This ${APP_NAME} was not started by the ${FORK_PACKAGE} npm launcher.`));
 		console.log(`Install the update with: npm ${args.join(" ")}`);
 		console.log(`Or download it from: https://github.com/${FORK_REPO}/releases/tag/${release.tag}`);

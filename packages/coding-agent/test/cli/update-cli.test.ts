@@ -220,14 +220,13 @@ describe("taoeffect fork release builds", () => {
 	let savedWrapperEnv: string | undefined;
 
 	beforeEach(() => {
-		// The suite may run inside an omp started by the fork's npm launcher; that must not make it run npm.
 		savedWrapperEnv = process.env[WRAPPER_ENV];
-		delete process.env[WRAPPER_ENV];
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		if (savedWrapperEnv !== undefined) process.env[WRAPPER_ENV] = savedWrapperEnv;
+		if (savedWrapperEnv === undefined) delete process.env[WRAPPER_ENV];
+		else process.env[WRAPPER_ENV] = savedWrapperEnv;
 	});
 
 	function stubForkRegistry(): string[] {
@@ -256,7 +255,10 @@ describe("taoeffect fork release builds", () => {
 		expect(release.version).toBe(NEXT_FORK_VERSION);
 	});
 
-	it("prints the npm command instead of installing when the npm launcher did not start omp", async () => {
+	it("prints the npm command instead of installing when omp inherited the npm launcher marker", async () => {
+		// The launcher sets its own pid for the omp it starts. A process started by that omp inherits
+		// the marker, but its parent is not the launcher.
+		process.env[WRAPPER_ENV] = String(process.pid);
 		stubForkRegistry();
 		const output: string[] = [];
 		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
