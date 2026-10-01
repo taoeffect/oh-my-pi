@@ -215,7 +215,8 @@ describe("getLatestRelease proxy errors", () => {
 
 describe("taoeffect fork release builds", () => {
 	const FORK_VERSION = "18.4.9-taoeffect.1";
-	const NEXT_FORK_VERSION = "18.4.10-taoeffect.1";
+	// Never published: if the launcher check breaks, the real `npm install -g` fails instead of installing a release.
+	const NEXT_FORK_VERSION = "999.0.0-taoeffect.1";
 	const WRAPPER_ENV = "OMP_TAOEFFECTS_NPM_WRAPPER";
 	let savedWrapperEnv: string | undefined;
 
@@ -270,6 +271,6 @@ describe("taoeffect fork release builds", () => {
 
 		await runUpdateCommand({ force: false, check: false, currentVersion: FORK_VERSION });
 
-		expect(output.join("\n")).toMatch(/npm install -g --registry=\S+ @taoeffects\/omp@18\.4\.10-taoeffect\.1/);
+		expect(output.join("\n")).toMatch(/npm install -g --registry=\S+ @taoeffects\/omp@999\.0\.0-taoeffect\.1/);
 	});
 });
