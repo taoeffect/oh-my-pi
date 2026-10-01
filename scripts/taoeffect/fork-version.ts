@@ -95,8 +95,8 @@ export function nextForkVersion(currentVersion: string, upstreamBase: UpstreamVe
 	};
 }
 
-/** Validates a version to release: a fork version with iteration ≥ 1 on the given upstream base. */
-export function parseReleaseVersion(version: string, upstreamBase: UpstreamVersion): ForkVersion {
+/** Validates a version to release: a fork version with iteration ≥ 1, on `upstreamBase` when one is given. */
+export function parseReleaseVersion(version: string, upstreamBase?: UpstreamVersion): ForkVersion {
 	if (version.startsWith("v")) {
 		throw new Error(
 			`Invalid release version ${version}: omit the leading "v" (use ${version.slice(1)}); only the git tag has it.`,
@@ -106,7 +106,7 @@ export function parseReleaseVersion(version: string, upstreamBase: UpstreamVersi
 	if (release.iteration < 1) {
 		throw new Error(`Invalid release version ${version}: the taoeffect iteration must be 1 or higher`);
 	}
-	if (compareUpstreamVersions(release.base, upstreamBase) !== 0) {
+	if (upstreamBase && compareUpstreamVersions(release.base, upstreamBase) !== 0) {
 		throw new Error(
 			`Release ${version} is based on ${release.base.version}, but this checkout merges upstream ${upstreamBase.version} (packages/natives/package.json)`,
 		);
