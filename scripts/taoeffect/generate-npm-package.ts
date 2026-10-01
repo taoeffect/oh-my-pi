@@ -13,17 +13,18 @@ import { NPM_PACKAGE_JSON_PATH, parseReleaseVersion, REPO_ROOT, readPackageVersi
 import { archiveDirName, FORK_REPOSITORY, RELEASE_TARGETS } from "./release-layout";
 
 const NPM_TEMPLATE_DIR = path.dirname(NPM_PACKAGE_JSON_PATH);
-const TEMPLATE_FILES = ["package.json", "install.js", "lib.js", "run-omp.js"];
-const ROOT_FILES = ["README.md", "LICENSE"];
+/** Entries of the template's `files` list that come from the repository root instead of `npm/`. */
+const ROOT_FILES: Record<string, true> = { "README.md": true, LICENSE: true };
 const REPOSITORY_PATTERN = /^[\w.-]+\/[\w.-]+$/;
 const CHECKSUM_LINE = /^([0-9a-f]{64})\s+\*?(.+)$/i;
 
 const USAGE = `Usage:
   bun scripts/taoeffect/generate-npm-package.ts [options]
 
-Writes the publishable npm package to --out: the npm/ template files, README.md,
-LICENSE, and package.json with <version> and the ompBinary download metadata
-for the release archives listed in <dist>/checksums.txt.
+Writes the publishable npm package to --out: every file that npm/package.json
+lists in "files" (README.md and LICENSE come from the repository root), and
+package.json with <version> and the ompBinary download metadata for the
+release archives listed in <dist>/checksums.txt.
 
 Options:
   --version <version>  Release version without "v" (default: npm/package.json).
@@ -112,19 +113,18 @@ export async function generateNpmPackage({ version, repo, distDir, outDir }: Gen
 
 	const checksums = parseChecksums(await Bun.file(path.join(resolvedDistDir, "checksums.txt")).text());
 	const ompBinary = buildOmpBinaryMetadata(version, repo, checksums);
+	const packageJson = (await Bun.file(NPM_PACKAGE_JSON_PATH).json()) as Record<string, unknown> & { files: string[] };
 
 	await fs.rm(resolvedOutDir, { recursive: true, force: true });
 	await fs.mkdir(resolvedOutDir, { recursive: true });
-	for (const file of TEMPLATE_FILES) {
-		await fs.copyFile(path.join(NPM_TEMPLATE_DIR, file), path.join(resolvedOutDir, file));
+	for (const file of packageJson.files) {
+		const sourceDir = ROOT_FILES[file] ? REPO_ROOT : NPM_TEMPLATE_DIR;
+		await fs.copyFile(path.join(sourceDir, file), path.join(resolvedOutDir, file));
 	}
-	for (const file of ROOT_FILES) await fs.copyFile(path.join(REPO_ROOT, file), path.join(resolvedOutDir, file));
 
-	const packageJsonPath = path.join(resolvedOutDir, "package.json");
-	const packageJson = (await Bun.file(packageJsonPath).json()) as Record<string, unknown>;
 	packageJson.version = version;
 	packageJson.ompBinary = ompBinary;
-	await Bun.write(packageJsonPath, `${JSON.stringify(packageJson, null, "\t")}\n`);
+	await Bun.write(path.join(resolvedOutDir, "package.json"), `${JSON.stringify(packageJson, null, "\t")}\n`);
 }
 
 if (import.meta.main) {
