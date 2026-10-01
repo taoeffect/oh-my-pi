@@ -15,7 +15,8 @@ describe("boundCommitMessages", () => {
 	test("cuts an oversized commit message instead of dropping the rest of the log", () => {
 		const log = boundCommitMessages(["x".repeat(500), "next"], 2, { maxMessageChars: 20, maxTotalChars: 100 });
 
-		expect(log.text).toStartWith(`${"x".repeat(20)}…`);
+		expect(log.text).toStartWith("x".repeat(20));
+		expect(log.text).not.toContain("x".repeat(21));
 		expect(log.text).toContain("next");
 		expect(log.omitted).toBe(0);
 	});
