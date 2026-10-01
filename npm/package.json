@@ -1,0 +1,53 @@
+{
+	"name": "@taoeffects/omp",
+	"version": "0.0.0-taoeffect.0",
+	"description": "omp coding agent CLI (taoeffect fork of oh-my-pi) as a prebuilt binary",
+	"keywords": [
+		"agent",
+		"ai",
+		"cli",
+		"coding-agent",
+		"llm",
+		"tui"
+	],
+	"homepage": "https://github.com/taoeffect/oh-my-pi#readme",
+	"bugs": {
+		"url": "https://github.com/taoeffect/oh-my-pi/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/taoeffect/oh-my-pi.git"
+	},
+	"license": "MIT",
+	"type": "module",
+	"bin": {
+		"omp": "run-omp.js"
+	},
+	"files": [
+		"install.js",
+		"lib.js",
+		"run-omp.js",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"postinstall": "node install.js"
+	},
+	"dependencies": {
+		"tar": "7.5.22"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"os": [
+		"linux",
+		"darwin"
+	],
+	"cpu": [
+		"x64",
+		"arm64"
+	],
+	"publishConfig": {
+		"access": "public"
+	}
+}

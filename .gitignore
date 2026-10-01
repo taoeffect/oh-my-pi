@@ -73,6 +73,9 @@ python/omp-rpc/build/
 .wt/
 CPU*.md
 packages/coding-agent/binaries/
+# @taoeffects/omp wrapper: downloaded binary and generated release package
+npm/vendor/
+.release/
 
 # robomp runtime state
 python/robomp/data/
