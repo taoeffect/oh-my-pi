@@ -166,10 +166,14 @@ jobs:
                 done
               ) > "$RUNNER_TEMP/usage.log" 2>&1 &
               monitor=$!
+              trap 'kill "$monitor" 2>/dev/null || true' EXIT
+              # The step runs with bash -e. Keep the status, so that a failed
+              # build also prints its time.
               start=$SECONDS
-              bazelisk --bazelrc="$rc" build "//:natives-$TARGET" 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+              build_status=0
+              bazelisk --bazelrc="$rc" build "//:natives-$TARGET" 2>&1 | tee "$RUNNER_TEMP/bazel-build.log" || build_status=$?
               echo "Bazel build took $((SECONDS - start)) s"
-              kill "$monitor" || true
+              [ "$build_status" -eq 0 ] || exit "$build_status"
               mkdir -p "ci-natives/natives-$TARGET"
               cp -L "bazel-bin/natives-$TARGET"/*.node "ci-natives/natives-$TARGET/"
               ls -l "ci-natives/natives-$TARGET"
