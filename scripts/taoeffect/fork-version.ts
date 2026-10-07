@@ -6,8 +6,10 @@
  * `npm/package.json`, where `0.0.0-taoeffect.0` means "never released".
  *
  * The upstream base is the upstream release merged into this checkout, read from
- * `packages/natives/package.json`. Release builds download the native addons that
- * upstream published under that version, so a release must use exactly that base.
+ * `packages/natives/package.json`. The checkout can also hold later upstream
+ * commits that are not in a release yet. Release builds compile the native
+ * addons from the tagged commit. A release must use exactly that base, so its
+ * version names the newest upstream release that it contains.
  */
 import * as path from "node:path";
 

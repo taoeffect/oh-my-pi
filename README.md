@@ -45,7 +45,7 @@ npm install -g --allow-scripts=@taoeffects/omp @taoeffects/omp@latest
 
 Newer npm versions skip install scripts unless you allow them. If the install skipped the download, `omp` downloads the binary the first time you run it. Both paths download the archive from the fork's [GitHub Releases](https://github.com/taoeffect/oh-my-pi/releases) and check its SHA-256 checksum.
 
-Fork releases use versions such as `18.4.9-taoeffect.1`: `18.4.9` identifies the upstream omp release, and `taoeffect.1` identifies this fork's release iteration. `omp update` updates the fork from `@taoeffects/omp`, never from upstream omp.
+Fork releases use versions such as `18.4.9-taoeffect.1`: `18.4.9` is the newest upstream omp release that the fork contains, and `taoeffect.1` identifies this fork's release iteration. A fork release can also contain later upstream changes that upstream has not released yet. `omp update` updates the fork from `@taoeffects/omp`, never from upstream omp.
 
 **Manual install (no npm)**
 
