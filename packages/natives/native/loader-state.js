@@ -194,15 +194,20 @@ export function resolveLoaderCandidates({
 
 // =========================================================================
 
+// taoeffect fork patch: also parse fork cache folders (`X.Y.Z-taoeffect.N`) so a
+// fork release removes older fork and upstream folders. A plain `X.Y.Z` gets
+// `Infinity` as its 4th part (a prerelease sorts before its release), and a plain
+// current version never removes fork folders, so upstream behavior is unchanged.
 function parseReleaseVersion(version) {
-	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-	return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+	const match = /^(\d+)\.(\d+)\.(\d+)(?:-taoeffect\.(\d+))?$/.exec(version);
+	return match ? [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4] ?? Infinity)] : null;
 }
 
 function isOlderReleaseVersion(candidate, current) {
 	const candidateParts = parseReleaseVersion(candidate);
 	const currentParts = parseReleaseVersion(current);
 	if (!candidateParts || !currentParts) return false;
+	if (currentParts[3] === Infinity && candidateParts[3] !== Infinity) return false;
 	for (let index = 0; index < candidateParts.length; index++) {
 		if (candidateParts[index] !== currentParts[index]) {
 			return candidateParts[index] < currentParts[index];
