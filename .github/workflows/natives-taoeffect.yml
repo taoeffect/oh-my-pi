@@ -7,14 +7,14 @@
 # install them with scripts/bazel-natives.ts --source.
 #
 # Each target has its own Bazel disk cache in actions/cache. Only warm runs
-# (a push to mine that changes native inputs, or a dispatch on mine with an
-# empty ref) save it, because a tag run can restore entries saved on the
-# default branch but an entry saved on a tag is visible to that tag only. A
-# warm run restores only the entry with the exact key. On a hit it builds from
-# that entry and does not save. On a miss it builds clean and saves, so each
-# entry holds one clean build and needs no Bazel garbage collection. All other
-# runs restore the exact entry, else the newest entry of the target, and never
-# save.
+# (a push to mine that changes native inputs, a dispatch on mine with an empty
+# ref, or the schedule) save it, because a tag run can restore entries saved
+# on the default branch but an entry saved on a tag is visible to that tag
+# only. A warm run restores only the entry with the exact key. On a hit it
+# builds from that entry and does not save. On a miss it builds clean and
+# saves, so each entry holds one clean build and needs no Bazel garbage
+# collection. All other runs restore the exact entry, else the newest entry of
+# the target, and never save.
 name: natives-taoeffect
 
 on:
@@ -49,6 +49,11 @@ on:
             required: false
             type: string
             default: ""
+   # GitHub deletes cache entries that are unused for 7 days. A scheduled run
+   # is a warm run, so it restores (and so keeps) each target's exact entry.
+   # It runs twice a week because GitHub can delay or drop scheduled runs.
+   schedule:
+      - cron: "17 4 * * 1,4"
 
 permissions:
    contents: read
