@@ -36,7 +36,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 ### Tao Effect fork (`@taoeffects/omp`)
 
-This repository is the Tao Effect fork of omp. **It adds [all these features](https://github.com/can1357/oh-my-pi/pulls?q=is%3Apr+state%3Aopen+author%3Ataoeffect).** It runs on Apple silicon Macs and on glibc-based Linux (x64 and arm64). Intel Macs and musl-based Linux systems such as Alpine are not supported. Install the fork from npm. It needs Node.js 20 or later:
+This repository is the Tao Effect fork of omp. **It adds [all these features](https://github.com/can1357/oh-my-pi/pulls?q=is%3Apr+state%3Aopen+author%3Ataoeffect).** It runs on Apple silicon Macs and on glibc-based Linux (x64 and arm64). Intel Macs and musl-based Linux systems such as Alpine are not supported. Install the fork from npm. It needs Node.js 20 or later (arm64 on a Mac):
 
 ```sh
 # --allow-scripts lets npm download the omp binary during the install
@@ -44,6 +44,8 @@ npm install -g --allow-scripts=@taoeffects/omp @taoeffects/omp@latest
 ```
 
 Newer npm versions skip install scripts unless you allow them. If the install skipped the download, `omp` downloads the binary the first time you run it. Both paths download the archive from the fork's [GitHub Releases](https://github.com/taoeffect/oh-my-pi/releases) and check its SHA-256 checksum.
+
+On a Mac, `node -p process.arch` must print `arm64`. An x64 Node.js, for example one from an old Intel Homebrew install, runs under Rosetta 2 and asks for an Intel Mac binary. The fork has none, so both paths fail with `has no omp binary for darwin-x64`. Install an arm64 Node.js, or use the manual install below.
 
 Fork releases use versions such as `18.4.9-taoeffect.1`: `18.4.9` is the newest upstream omp release that the fork contains, and `taoeffect.1` identifies this fork's release iteration. A fork release can also contain later upstream changes that upstream has not released yet. `omp update` updates the fork from `@taoeffects/omp`, never from upstream omp.
 
