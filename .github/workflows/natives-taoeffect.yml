@@ -61,7 +61,8 @@ jobs:
    build:
       name: Build natives ${{ matrix.target }}
       runs-on: ubuntu-24.04
-      timeout-minutes: 120
+      # A cold darwin-arm64 leg, the slowest, takes about 33 min.
+      timeout-minutes: 60
       # actions: write lets warm runs delete old cache entries. A caller job
       # must grant it too.
       permissions:
@@ -89,12 +90,20 @@ jobs:
          BAZEL_DISK_CACHE: /mnt/omp-bazel/disk-cache
          BAZEL_OUTPUT_ROOT: /mnt/omp-bazel/root
       steps:
-         # Runs before any build tool. Only quick deletions of large toolsets
-         # that the build does not use (Bazel downloads its own Swift). Keep
-         # python3, cmake and ninja: the macOS SDK and opusic-sys need them.
+         # Runs before any build tool. The darwin leg needs about 25 GB, and the
+         # ubuntu-24.04 image has about 86 GB free (/mnt is on the same disk).
+         # The deletions take 30-130 s, so they run only when space is short.
+         # Only quick deletions of large toolsets that the build does not use
+         # (Bazel downloads its own Swift). Keep python3, cmake and ninja: the
+         # macOS SDK and opusic-sys need them.
          - name: Free disk space
            run: |
               df -h / /mnt || true
+              free_gib="$(df -BG --output=avail / /mnt 2>/dev/null | awk 'NR > 1 { v = $1 + 0; if (min == "" || v < min) min = v } END { print min + 0 }')" || true
+              if [ "${free_gib:-0}" -ge 40 ]; then
+                echo "$free_gib GiB free, so no cleanup is needed"
+                exit 0
+              fi
               start=$SECONDS
               for dir in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift; do
                 sudo rm -rf "$dir" &
