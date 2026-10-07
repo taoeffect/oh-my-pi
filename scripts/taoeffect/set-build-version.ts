@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 /**
- * CI only: writes the fork release version into the manifests that the compiled
- * binary takes its version from, so `omp --version` prints `omp/<fork version>`.
- * The Crush fork injects its version with `-ldflags` instead.
+ * CI only: writes the fork release version into the workspace manifests, so
+ * `omp --version` prints `omp/<fork version>`. The Crush fork injects its version
+ * with `-ldflags` instead.
  *
  * `packages/utils/package.json` provides the runtime `VERSION`, and
  * `packages/coding-agent/package.json` must match it. `packages/natives/package.json`
- * keeps the upstream version because the downloaded addons carry that version stamp.
+ * sets the version stamped into the addons built from this checkout and the
+ * `~/.omp/natives/<version>` folder they are extracted to, so a fork build never
+ * shares that folder with an upstream build of the same base.
  * Never commit the result.
  */
 import * as path from "node:path";
@@ -14,19 +16,24 @@ import { parseArgs } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import { parseReleaseVersion, REPO_ROOT, readUpstreamBase } from "./fork-version";
 
-export const BUILD_VERSION_MANIFESTS = ["packages/utils/package.json", "packages/coding-agent/package.json"] as const;
+export const BUILD_VERSION_MANIFESTS = [
+	"packages/natives/package.json",
+	"packages/utils/package.json",
+	"packages/coding-agent/package.json",
+] as const;
 
-// Top-level keys of the workspace manifests are indented with one tab.
-const TOP_LEVEL_VERSION_LINE = /^(\t"version": )"([^"]*)",$/m;
+// Top-level keys are indented with one tab (utils, coding-agent) or two spaces (natives).
+const TOP_LEVEL_VERSION_LINE = /^((?:\t| {2})"version": )"([^"]*)",$/m;
 const VersionedManifest = type({ version: "string" });
 
 const USAGE = `Usage:
   bun scripts/taoeffect/set-build-version.ts <version>
 
 Release builds only. Replaces the upstream version in
-${BUILD_VERSION_MANIFESTS.join(" and ")} with <version>
-(<upstream base>-taoeffect.<n>, n >= 1). Run it once on a clean checkout and do
-not commit the result; restore the files with:
+${BUILD_VERSION_MANIFESTS.join(", ")} with <version>
+(<upstream base>-taoeffect.<n>, n >= 1). Run it once on a clean checkout, after
+every step that reads the upstream base from these files, and do not commit the
+result; restore the files with:
   git checkout -- ${BUILD_VERSION_MANIFESTS.join(" ")}`;
 
 /** Rewrites the `version` line of each build manifest. Changes no file unless every manifest is on the upstream base. */
