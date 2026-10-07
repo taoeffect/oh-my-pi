@@ -383,12 +383,19 @@ jobs:
               fi
               check_version "$without_scripts/bin/omp" "$RUNNER_TEMP/runtime-without-scripts"
          # npm needs --tag latest to publish a prerelease version.
+         # npm logs why the trusted publishing token exchange failed only at verbose level.
          - name: Publish npm package
            if: steps.npm.outputs.published != 'true'
            env:
               TGZ: ${{ steps.pack.outputs.tgz }}
            run: |
-              if ! npm publish "$TGZ" --access public --tag latest; then
-                echo "::error::npm publish failed. For the first release, publish the npm-package artifact of this run by hand, set up npm trusted publishing for this workflow, then rerun."
+              if ! npm publish "$TGZ" --access public --tag latest --loglevel verbose; then
+                echo "::error::npm publish failed. If the error is ENEEDAUTH, E401, or E403, npm trusted publishing gave this job no token. The 'npm verbose oidc' lines above give the reason. Read the hints below."
+                echo "On npmjs.com, open @taoeffects/omp > Settings > Trusted publishing. The GitHub Actions entry must:"
+                echo "  - show the status Valid. A new entry expires if no publish uses it within 2 days. Delete an expired entry and add it again."
+                echo "  - allow 'npm publish', not only 'npm stage publish'."
+                echo "  - match the repository taoeffect/oh-my-pi and the workflow release-taoeffect.yml exactly, with no environment."
+                echo "After the fix, rerun the failed jobs: gh run rerun $GITHUB_RUN_ID --repo $GITHUB_REPOSITORY --failed"
+                echo "If @taoeffects/omp is not on npm yet, publish the npm-package artifact of this run by hand first. Then add the trusted publisher and rerun."
                 exit 1
               fi
