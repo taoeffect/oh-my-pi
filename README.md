@@ -36,7 +36,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 ### Tao Effect fork (`@taoeffects/omp`)
 
-This repository is the Tao Effect fork of omp. **It adds [all these features](https://github.com/can1357/oh-my-pi/pulls?q=is%3Apr+state%3Aopen+author%3Ataoeffect).** It runs on macOS and on glibc-based Linux, on x64 and arm64. Alpine and other musl-based Linux systems are not supported. Install the fork from npm. It needs Node.js 20 or later:
+This repository is the Tao Effect fork of omp. **It adds [all these features](https://github.com/can1357/oh-my-pi/pulls?q=is%3Apr+state%3Aopen+author%3Ataoeffect).** It runs on Apple silicon Macs and on glibc-based Linux (x64 and arm64). Intel Macs and musl-based Linux systems such as Alpine are not supported. Install the fork from npm. It needs Node.js 20 or later:
 
 ```sh
 # --allow-scripts lets npm download the omp binary during the install
@@ -49,7 +49,7 @@ Fork releases use versions such as `18.4.9-taoeffect.1`: `18.4.9` identifies the
 
 **Manual install (no npm)**
 
-Download `checksums.txt` and the archive for your platform from [GitHub Releases](https://github.com/taoeffect/oh-my-pi/releases). The archives are `omp_<version>_Linux_x86_64.tar.gz`, `omp_<version>_Linux_arm64.tar.gz`, `omp_<version>_Darwin_x86_64.tar.gz`, and `omp_<version>_Darwin_arm64.tar.gz`. Then:
+Download `checksums.txt` and the archive for your platform from [GitHub Releases](https://github.com/taoeffect/oh-my-pi/releases). The archives are `omp_<version>_Linux_x86_64.tar.gz`, `omp_<version>_Linux_arm64.tar.gz`, and `omp_<version>_Darwin_arm64.tar.gz`. Then:
 
 ```sh
 VERSION=18.4.9-taoeffect.1
@@ -68,7 +68,7 @@ xattr -d com.apple.quarantine ~/.local/bin/omp 2>/dev/null || true
 
 If your shell cannot find `omp`, `~/.local/bin` is not on your `PATH`. macOS does not add it by default. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (for example `~/.zshrc` on macOS), then open a new terminal.
 
-The macOS binaries are not signed with an Apple Developer ID and are not notarized. Files that npm downloads get no quarantine attribute, so an npm install needs no extra step. A browser can quarantine the archive, and Finder's Archive Utility copies the attribute to the files it extracts. macOS does not run a quarantined unsigned binary. The `xattr` command removes the attribute and does nothing when it is not set.
+The macOS binary is not signed with an Apple Developer ID and is not notarized. Files that npm downloads get no quarantine attribute, so an npm install needs no extra step. A browser can quarantine the archive, and Finder's Archive Utility copies the attribute to the files it extracts. macOS does not run a quarantined unsigned binary. The `xattr` command removes the attribute and does nothing when it is not set.
 
 A manually installed `omp` does not replace itself. For a new release, `omp update` prints the npm command and the release URL.
 

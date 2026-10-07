@@ -14,7 +14,6 @@ export const FORK_REPOSITORY = "taoeffect/oh-my-pi";
 export const RELEASE_TARGETS = [
 	{ key: "linux-x64", arch: "x64", archiveSuffix: "Linux_x86_64" },
 	{ key: "linux-arm64", arch: "arm64", archiveSuffix: "Linux_arm64" },
-	{ key: "darwin-x64", arch: "x64", archiveSuffix: "Darwin_x86_64" },
 	{ key: "darwin-arm64", arch: "arm64", archiveSuffix: "Darwin_arm64" },
 ] as const;
 

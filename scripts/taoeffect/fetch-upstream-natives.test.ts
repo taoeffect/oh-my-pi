@@ -18,16 +18,16 @@ describe("verifyIntegrity", () => {
 describe("installLeafAddons", () => {
 	test("installs a baseline-only x64 leaf and removes a stale local modern build", async () => {
 		using temp = TempDir.createSync("@omp-natives-");
-		await Bun.write(temp.join("pi_natives.darwin-x64-modern.node"), "stale local build");
+		await Bun.write(temp.join("pi_natives.linux-x64-modern.node"), "stale local build");
 		const tarball = await leafTarball({
 			"package/package.json": "{}",
-			"package/pi_natives.darwin-x64-baseline.node": "upstream baseline",
+			"package/pi_natives.linux-x64-baseline.node": "upstream baseline",
 		});
 
-		await installLeafAddons(tarball, parseReleaseTarget("darwin-x64"), temp.path(), "leaf");
+		await installLeafAddons(tarball, parseReleaseTarget("linux-x64"), temp.path(), "leaf");
 
-		expect(await Bun.file(temp.join("pi_natives.darwin-x64-baseline.node")).text()).toBe("upstream baseline");
-		expect(await Bun.file(temp.join("pi_natives.darwin-x64-modern.node")).exists()).toBe(false);
+		expect(await Bun.file(temp.join("pi_natives.linux-x64-baseline.node")).text()).toBe("upstream baseline");
+		expect(await Bun.file(temp.join("pi_natives.linux-x64-modern.node")).exists()).toBe(false);
 	});
 
 	test("changes no local addon when the leaf lacks the baseline build", async () => {

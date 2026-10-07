@@ -4,7 +4,7 @@ import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { buildOmpBinaryMetadata, generateNpmPackage, parseChecksums } from "./generate-npm-package";
 
 const VERSION = "18.4.9-taoeffect.1";
-const SUFFIXES = ["Linux_x86_64", "Linux_arm64", "Darwin_x86_64", "Darwin_arm64"];
+const SUFFIXES = ["Linux_x86_64", "Linux_arm64", "Darwin_arm64"];
 
 /** `sha256sum dist/*.tar.gz` output; the last line uses the binary-mode `*` marker. */
 function sha256sumOutput(suffixes: readonly string[]): string {
@@ -22,11 +22,11 @@ describe("buildOmpBinaryMetadata", () => {
 		const metadata = buildOmpBinaryMetadata(VERSION, "taoeffect/oh-my-pi", parseChecksums(sha256sumOutput(SUFFIXES)));
 
 		expect(metadata.tag).toBe(`v${VERSION}`);
-		expect(Object.keys(metadata.archives).sort()).toEqual(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
+		expect(Object.keys(metadata.archives).sort()).toEqual(["darwin-arm64", "linux-arm64", "linux-x64"]);
 		expect(metadata.archives["darwin-arm64"]).toEqual({
 			name: `omp_${VERSION}_Darwin_arm64.tar.gz`,
 			url: `https://github.com/taoeffect/oh-my-pi/releases/download/v${VERSION}/omp_${VERSION}_Darwin_arm64.tar.gz`,
-			checksum: { algorithm: "sha256", digest: "3".repeat(64) },
+			checksum: { algorithm: "sha256", digest: "2".repeat(64) },
 			wrappedIn: `omp_${VERSION}_Darwin_arm64`,
 			bin: "omp",
 		});
