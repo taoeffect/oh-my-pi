@@ -68,6 +68,13 @@ provider "anthropic" {
 	// combines this fact with a per-request effective-URL check, so it never
 	// authorizes a block on its own.
 	first-party-provider #true
+	// Messages requests cap at 32 MB. Reserve 8 MB for text, tools, and JSON
+	// framing when retaining inline base64 images in a long conversation.
+	// Applied only on the official endpoint; a custom baseUrl has its own limit.
+	// https://platform.claude.com/docs/en/api/overview#request-size-limits
+	on-api "anthropic-messages" {
+		inline-image-byte-budget 24000000
+	}
 	class "anthropic" {
 		revision ">=3.7 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

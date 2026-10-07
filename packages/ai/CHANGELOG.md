@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added session restrictions for OAuth account pools via `AuthStorage.sessions.restrict`, limiting selection, fallback, rotation, and authentication to specified accounts until the returned lease is released with `sessions.unrestrict`. API keys and other accounts are not used when a session is restricted.
+- Exported `resolveCredentialIdentityKey` for determining the identity key used to match credentials with broker account pools and session restrictions.
+
+### Fixed
+
+- Fixed Codex Fast (`priority`) and Ultrafast usage being recorded, billed, and reported as Standard when the backend echoed a default service tier; the requested tier is now preserved in usage and performance records.
+
 ## [18.8.0] - 2026-10-07
 
 ### Breaking Changes
