@@ -10,8 +10,11 @@
 # (a push to mine that changes native inputs, or a dispatch on mine with an
 # empty ref) save it, because a tag run can restore entries saved on the
 # default branch but an entry saved on a tag is visible to that tag only. A
-# warm run does not restore, so each entry holds one clean build and needs no
-# Bazel garbage collection. All other runs restore and never save.
+# warm run restores only the entry with the exact key. On a hit it builds from
+# that entry and does not save. On a miss it builds clean and saves, so each
+# entry holds one clean build and needs no Bazel garbage collection. All other
+# runs restore the exact entry, else the newest entry of the target, and never
+# save.
 name: natives-taoeffect
 
 on:
@@ -132,20 +135,13 @@ jobs:
               sudo chown "$(id -u):$(id -g)" "$BAZEL_DISK_CACHE" "$BAZEL_OUTPUT_ROOT"
          - name: Restore Bazel disk cache
            id: cache-restore
-           if: env.WARM != 'true'
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ${{ env.BAZEL_DISK_CACHE }}
               key: ${{ steps.cache-key.outputs.key }}
-              restore-keys: ${{ steps.cache-key.outputs.prefix }}
-         - name: Check for a saved Bazel disk cache
-           id: cache-probe
-           if: env.WARM == 'true'
-           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-           with:
-              path: ${{ env.BAZEL_DISK_CACHE }}
-              key: ${{ steps.cache-key.outputs.key }}
-              lookup-only: true
+              # Warm runs take only the exact entry. On a miss they build
+              # clean and save, so each entry holds one clean build.
+              restore-keys: ${{ env.WARM != 'true' && steps.cache-key.outputs.prefix || '' }}
          - name: Build native addon
            run: |
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -201,18 +197,21 @@ jobs:
            env:
               CACHE_KEY: ${{ steps.cache-key.outputs.key }}
               RESTORED_KEY: ${{ steps.cache-restore.outputs.cache-matched-key }}
-              SAVED: ${{ steps.cache-probe.outputs.cache-hit }}
+              EXACT_HIT: ${{ steps.cache-restore.outputs.cache-hit }}
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI codes before
               # matching, as upstream ci.yml does.
               summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
               echo "::notice title=Bazel build summary ($TARGET)::${summary:-no process summary found}"
-              if [ "$WARM" = true ]; then
-                cache="warm run, built without a cache; entry $CACHE_KEY already saved: ${SAVED:-false}"
+              if [ "$EXACT_HIT" = true ]; then
+                cache="restored the exact entry $RESTORED_KEY"
               elif [ -n "$RESTORED_KEY" ]; then
                 cache="restored $RESTORED_KEY (wanted $CACHE_KEY)"
               else
                 cache="no entry restored (wanted $CACHE_KEY)"
+              fi
+              if [ "$WARM" = true ]; then
+                cache="warm run: $cache"
               fi
               echo "::notice title=Bazel disk cache ($TARGET)::$cache"
               awk '{ if ($2 > peak[$1]) peak[$1] = $2 } END { for (k in peak) printf "Peak use (%s): %d MiB\n", k, peak[k] }' "$RUNNER_TEMP/usage.log" || true
@@ -228,7 +227,7 @@ jobs:
               if-no-files-found: error
               retention-days: 7
          - name: Save Bazel disk cache
-           if: env.WARM == 'true' && steps.cache-probe.outputs.cache-hit != 'true'
+           if: env.WARM == 'true' && steps.cache-restore.outputs.cache-hit != 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ${{ env.BAZEL_DISK_CACHE }}
