@@ -1,0 +1,248 @@
+# Builds the native addons of the taoeffect fork with Bazel, one target per
+# leg. Every leg cross-builds on a GitHub-hosted Linux x64 runner, like
+# upstream's native_addons_cross job (which runs on self-hosted pods).
+#
+# release-taoeffect.yml calls this workflow with the release tag. Its jobs
+# download the natives-<target> artifacts (raw, unstamped Bazel output) and
+# install them with scripts/bazel-natives.ts --source.
+#
+# Each target has its own Bazel disk cache in actions/cache. Only warm runs
+# (a push to mine that changes native inputs, or a dispatch on mine with an
+# empty ref) save it, because a tag run can restore entries saved on the
+# default branch but an entry saved on a tag is visible to that tag only. A
+# warm run does not restore, so each entry holds one clean build and needs no
+# Bazel garbage collection. All other runs restore and never save.
+name: natives-taoeffect
+
+on:
+   workflow_call:
+      inputs:
+         ref:
+            description: Git ref to build, such as refs/tags/v18.8.2-taoeffect.2
+            required: false
+            type: string
+            default: ""
+   push:
+      branches: [mine]
+      # The native inputs that the cache key hashes, plus this file.
+      paths:
+         - "Cargo.toml"
+         - "Cargo.lock"
+         - "MODULE.bazel"
+         - "MODULE.bazel.lock"
+         - "rust-toolchain.toml"
+         - "rustfmt.toml"
+         - ".bazelrc"
+         - ".bazelignore"
+         - ".bazelversion"
+         - "bazel/**"
+         - "crates/**"
+         - "BUILD.bazel"
+         - ".github/workflows/natives-taoeffect.yml"
+   workflow_dispatch:
+      inputs:
+         ref:
+            description: Git ref or commit to build. Empty builds the selected branch and, on mine, saves the cache.
+            required: false
+            type: string
+            default: ""
+
+permissions:
+   contents: read
+
+env:
+   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+defaults:
+   run:
+      shell: bash
+
+jobs:
+   build:
+      name: Build natives ${{ matrix.target }}
+      runs-on: ubuntu-24.04
+      timeout-minutes: 120
+      # actions: write lets warm runs delete old cache entries. A caller job
+      # must grant it too.
+      permissions:
+         contents: read
+         actions: write
+      # A newer warm run cancels an older one. Release runs are never cancelled.
+      concurrency:
+         group: natives-taoeffect-${{ inputs.ref || github.ref }}-${{ matrix.target }}
+         cancel-in-progress: ${{ !inputs.ref }}
+      strategy:
+         fail-fast: false
+         matrix:
+            # Bare names, as scripts/bazel-natives.ts takes them. The Bazel
+            # label is //:natives-<target>. The linux-x64 binary embeds both
+            # x64 variants.
+            target: [linux-x64-baseline, linux-x64-modern, linux-arm64, darwin-arm64]
+      env:
+         TARGET: ${{ matrix.target }}
+         # In a called workflow, github.* is the caller's context, so a release
+         # dispatched from mine also has github.ref == refs/heads/mine. Only the
+         # ref input tells a release apart from a warm run.
+         WARM: ${{ !inputs.ref && github.ref == 'refs/heads/mine' }}
+         # Restore and save must use the same literal path: the actions/cache
+         # version hashes the path string.
+         BAZEL_DISK_CACHE: /mnt/omp-bazel/disk-cache
+         BAZEL_OUTPUT_ROOT: /mnt/omp-bazel/root
+      steps:
+         # Runs before any build tool. Only quick deletions of large toolsets
+         # that the build does not use (Bazel downloads its own Swift). Keep
+         # python3, cmake and ninja: the macOS SDK and opusic-sys need them.
+         - name: Free disk space
+           run: |
+              df -h / /mnt || true
+              start=$SECONDS
+              for dir in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift; do
+                sudo rm -rf "$dir" &
+              done
+              wait
+              echo "Disk cleanup took $((SECONDS - start)) s"
+              df -h / /mnt || true
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              persist-credentials: false
+              ref: ${{ inputs.ref || github.sha }}
+         - name: Compute Bazel cache key
+           id: cache-key
+           env:
+              # Same native inputs as the addon cache key in upstream ci.yml.
+              NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
+           run: |
+              prefix="taoeffect-bazel-$TARGET-v1-"
+              {
+                echo "prefix=$prefix"
+                echo "key=$prefix$NATIVE_INPUTS_HASH"
+              } >> "$GITHUB_OUTPUT"
+         - name: Prepare Bazel folders
+           run: |
+              sudo mkdir -p "$BAZEL_DISK_CACHE" "$BAZEL_OUTPUT_ROOT"
+              sudo chown "$(id -u):$(id -g)" "$BAZEL_DISK_CACHE" "$BAZEL_OUTPUT_ROOT"
+         - name: Restore Bazel disk cache
+           id: cache-restore
+           if: env.WARM != 'true'
+           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ${{ env.BAZEL_DISK_CACHE }}
+              key: ${{ steps.cache-key.outputs.key }}
+              restore-keys: ${{ steps.cache-key.outputs.prefix }}
+         - name: Check for a saved Bazel disk cache
+           id: cache-probe
+           if: env.WARM == 'true'
+           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ${{ env.BAZEL_DISK_CACHE }}
+              key: ${{ steps.cache-key.outputs.key }}
+              lookup-only: true
+         - name: Build native addon
+           run: |
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              rc="$RUNNER_TEMP/bazel-taoeffect.rc"
+              {
+                echo "startup --output_user_root=$BAZEL_OUTPUT_ROOT"
+                echo "common --config=ci"
+                echo "common --disk_cache=$BAZEL_DISK_CACHE"
+              } > "$rc"
+              # Records memory and disk use every 5 s, for the report step.
+              (
+                set +e
+                while :; do
+                  free -m | awk '/^Mem:/ { print "memory", $3 }'
+                  df -BM --output=target,used / /mnt | awk 'NR > 1 { print "disk:" $1, $2 + 0 }'
+                  sleep 5
+                done
+              ) > "$RUNNER_TEMP/usage.log" 2>&1 &
+              monitor=$!
+              start=$SECONDS
+              bazelisk --bazelrc="$rc" build "//:natives-$TARGET" 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+              echo "Bazel build took $((SECONDS - start)) s"
+              kill "$monitor" || true
+              mkdir -p "ci-natives/natives-$TARGET"
+              cp -L "bazel-bin/natives-$TARGET"/*.node "ci-natives/natives-$TARGET/"
+              ls -l "ci-natives/natives-$TARGET"
+         # Same check as upstream ci.yml native_addons_cross. The bridge is an
+         # embedded dylib (module OmpAppleFm) and is never linked: a linked
+         # Swift runtime crashes the addon on load on older macOS.
+         - name: Verify Apple Foundation Models bridge
+           if: matrix.target == 'darwin-arm64'
+           run: |
+              addon=ci-natives/natives-darwin-arm64/pi_natives.darwin-arm64.node
+              grep -aqF OmpAppleFm "$addon" ||
+                 { echo "::error::Darwin arm64 addon was built without the Apple Foundation Models bridge"; exit 1; }
+              # The x64 runner image can have only the versioned LLVM tool.
+              objdump="$(command -v llvm-objdump || command -v llvm-objdump-18 || true)"
+              if [ -z "$objdump" ]; then
+                 echo "::error::Neither llvm-objdump nor llvm-objdump-18 is installed"
+                 exit 1
+              fi
+              echo "Using $objdump"
+              dylibs="$("$objdump" --macho --dylibs-used "$addon")"
+              if grep -E 'libswift|FoundationModels' <<< "$dylibs"; then
+                 echo "::error::Darwin arm64 addon links the Swift runtime or FoundationModels directly"
+                 exit 1
+              fi
+         # Also runs after a failed build: the numbers help to tune memory,
+         # disk and timeouts.
+         - name: Report build resources
+           if: ${{ !cancelled() }}
+           continue-on-error: true
+           env:
+              CACHE_KEY: ${{ steps.cache-key.outputs.key }}
+              RESTORED_KEY: ${{ steps.cache-restore.outputs.cache-matched-key }}
+              SAVED: ${{ steps.cache-probe.outputs.cache-hit }}
+           run: |
+              # Bazel runs with --color=yes (config=ci); strip ANSI codes before
+              # matching, as upstream ci.yml does.
+              summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
+              echo "::notice title=Bazel build summary ($TARGET)::${summary:-no process summary found}"
+              if [ "$WARM" = true ]; then
+                cache="warm run, built without a cache; entry $CACHE_KEY already saved: ${SAVED:-false}"
+              elif [ -n "$RESTORED_KEY" ]; then
+                cache="restored $RESTORED_KEY (wanted $CACHE_KEY)"
+              else
+                cache="no entry restored (wanted $CACHE_KEY)"
+              fi
+              echo "::notice title=Bazel disk cache ($TARGET)::$cache"
+              awk '{ if ($2 > peak[$1]) peak[$1] = $2 } END { for (k in peak) printf "Peak use (%s): %d MiB\n", k, peak[k] }' "$RUNNER_TEMP/usage.log" || true
+              du -sh "$BAZEL_DISK_CACHE" "$BAZEL_OUTPUT_ROOT" || true
+              df -h / /mnt || true
+         # The artifact root is ci-natives/, so the artifact holds
+         # natives-<target>/<file>, the layout bazel-natives.ts --source reads.
+         - name: Upload native addon artifact
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: natives-${{ matrix.target }}
+              path: ci-natives/
+              if-no-files-found: error
+              retention-days: 7
+         - name: Save Bazel disk cache
+           if: env.WARM == 'true' && steps.cache-probe.outputs.cache-hit != 'true'
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ${{ env.BAZEL_DISK_CACHE }}
+              key: ${{ steps.cache-key.outputs.key }}
+         # Keeps only the entry for the current key, so the 10 GB repo quota
+         # holds one entry per target. Selects by key, not by age, so the entry
+         # that matches the current inputs is never deleted.
+         - name: Prune other Bazel disk cache entries
+           if: env.WARM == 'true'
+           continue-on-error: true
+           env:
+              GH_TOKEN: ${{ github.token }}
+              GH_REPO: ${{ github.repository }}
+              CACHE_PREFIX: ${{ steps.cache-key.outputs.prefix }}
+              CACHE_KEY: ${{ steps.cache-key.outputs.key }}
+           run: |
+              entries="$(gh cache list --ref refs/heads/mine --key "$CACHE_PREFIX" --limit 100 --json id,key)"
+              if ! jq -e --arg key "$CACHE_KEY" 'any(.[]; .key == $key)' <<< "$entries" > /dev/null; then
+                echo "::warning::No cache entry $CACHE_KEY on mine, so the old entries stay"
+                exit 0
+              fi
+              jq -r --arg key "$CACHE_KEY" '.[] | select(.key != $key) | .id' <<< "$entries" |
+                while read -r id; do
+                  echo "Deleting cache entry $id"
+                  gh cache delete "$id"
+                done
