@@ -1,7 +1,8 @@
 # Release pipeline for the taoeffect fork (@taoeffects/omp). Started by the tag
-# that scripts/taoeffect/bump-version-and-release.ts pushes. Builds unsigned
-# Linux and macOS binaries, attaches them to a GitHub Release, and publishes
-# the npm wrapper from npm/ through npm trusted publishing.
+# that scripts/taoeffect/bump-version-and-release.ts pushes. Builds the native
+# addons of the tagged commit (natives-taoeffect.yml), then unsigned Linux and
+# Apple silicon macOS binaries, attaches them to a GitHub Release, and
+# publishes the npm wrapper from npm/ through npm trusted publishing.
 name: release-taoeffect
 
 on:
@@ -88,12 +89,26 @@ jobs:
          - name: Test fork release scripts
            run: bun test scripts/taoeffect
 
+   # Builds the native addons of the tagged commit, one natives-<target>
+   # artifact per addon. The test and build jobs install them from there.
+   natives:
+      name: Natives
+      needs: metadata
+      # The called job asks for actions: write (warm runs delete old cache
+      # entries), so this job must grant it too, or the run fails validation.
+      permissions:
+         contents: read
+         actions: write
+      uses: ./.github/workflows/natives-taoeffect.yml
+      with:
+         ref: refs/tags/${{ needs.metadata.outputs.tag }}
+
    # The upstream TypeScript suite (`bun run ci:test:ts`), split into the same
    # buckets and concurrency limits that upstream ci.yml uses on GitHub-hosted
    # pull request runners.
    test:
       name: Test ${{ matrix.bucket }} ${{ matrix.shard }}
-      needs: metadata
+      needs: [metadata, natives]
       runs-on: ubuntu-24.04
       timeout-minutes: 30
       strategy:
@@ -114,8 +129,17 @@ jobs:
               persist-credentials: false
               ref: refs/tags/${{ needs.metadata.outputs.tag }}
          - uses: ./.github/actions/bun-install
-         - name: Install upstream native addons
-           run: bun scripts/taoeffect/fetch-upstream-natives.ts linux-x64
+         - name: Download native addons
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: natives-linux-x64-*
+              path: ${{ runner.temp }}/ci-natives
+              merge-multiple: true
+         # No set-build-version here: the addons must carry this checkout's
+         # natives version, or the loader treats them as stale and turns
+         # missing exports into throwing stubs.
+         - name: Install native addons
+           run: bun scripts/bazel-natives.ts linux-x64-baseline linux-x64-modern --source "$RUNNER_TEMP/ci-natives"
          - name: Run test bucket
            env:
               TEST_BUCKET: ${{ matrix.bucket }}
@@ -125,12 +149,11 @@ jobs:
 
    # Every leg builds on Linux. On a Linux host ci-release-build-binaries.ts runs
    # no codesign. darwin-arm64 keeps only the ad-hoc linker signature that Bun
-   # writes (Apple Silicon refuses arm64 binaries with no signature); darwin-x64
-   # ships unsigned. The fork ships no Developer ID signing or notarization, like
-   # the Crush fork.
+   # writes (Apple silicon refuses arm64 binaries with no signature). The fork
+   # ships no Developer ID signing or notarization, like the Crush fork.
    build:
       name: Build ${{ matrix.target }}
-      needs: metadata
+      needs: [metadata, natives]
       runs-on: ${{ matrix.os }}
       timeout-minutes: 30
       strategy:
@@ -138,11 +161,25 @@ jobs:
          matrix:
             # archive_suffix must match RELEASE_TARGETS in scripts/taoeffect/release-layout.ts;
             # generate-npm-package.ts in the release job fails on a mismatch.
+            # native_targets are the addons that the binary embeds, as bare
+            # scripts/bazel-natives.ts names; natives_pattern selects their
+            # natives-<target> artifacts.
             include:
-               - { target: linux-x64, os: ubuntu-24.04, archive_suffix: Linux_x86_64 }
-               - { target: linux-arm64, os: ubuntu-24.04-arm, archive_suffix: Linux_arm64 }
-               - { target: darwin-x64, os: ubuntu-24.04, archive_suffix: Darwin_x86_64 }
-               - { target: darwin-arm64, os: ubuntu-24.04, archive_suffix: Darwin_arm64 }
+               - target: linux-x64
+                 os: ubuntu-24.04
+                 archive_suffix: Linux_x86_64
+                 native_targets: linux-x64-baseline linux-x64-modern
+                 natives_pattern: natives-linux-x64-*
+               - target: linux-arm64
+                 os: ubuntu-24.04-arm
+                 archive_suffix: Linux_arm64
+                 native_targets: linux-arm64
+                 natives_pattern: natives-linux-arm64
+               - target: darwin-arm64
+                 os: ubuntu-24.04
+                 archive_suffix: Darwin_arm64
+                 native_targets: darwin-arm64
+                 natives_pattern: natives-darwin-arm64
       env:
          VERSION: ${{ needs.metadata.outputs.version }}
          TARGET: ${{ matrix.target }}
@@ -152,24 +189,30 @@ jobs:
               persist-credentials: false
               ref: refs/tags/${{ needs.metadata.outputs.tag }}
          - uses: ./.github/actions/bun-install
-         - name: Install upstream native addons
-           run: bun scripts/taoeffect/fetch-upstream-natives.ts "$TARGET"
-         # omp --version prints the utils/coding-agent package version, so stamp
-         # the fork version into this checkout only. The natives version stays
-         # upstream so the embedded addon still passes its version check.
+         - name: Download native addons
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: ${{ matrix.natives_pattern }}
+              path: ${{ runner.temp }}/ci-natives
+              merge-multiple: true
+         # omp --version prints the utils/coding-agent package version, and the
+         # loader extracts the addon into ~/.omp/natives/<natives version>. So
+         # stamp the fork version into all three manifests of this checkout,
+         # before the addons get their version stamp.
          - name: Set build version
            run: bun scripts/taoeffect/set-build-version.ts "$VERSION"
+         # Stamps the fork version into the addons (embed-native checks it) and
+         # load-tests the addon of the runner's own platform.
+         - name: Install native addons
+           env:
+              NATIVE_TARGETS: ${{ matrix.native_targets }}
+           run: |
+              read -r -a targets <<< "$NATIVE_TARGETS"
+              bun scripts/bazel-natives.ts "${targets[@]}" --source "$RUNNER_TEMP/ci-natives"
          - name: Build release binary
            env:
               RELEASE_TARGETS: ${{ matrix.target }}
            run: bun run ci:release:build-binaries
-         # Bun leaves an invalid copy of its own runtime's signature in a
-         # cross-compiled darwin-x64 binary, and macOS kills such a binary. This
-         # removes it (the Crush fork's x86_64 binary is unsigned too) and fails
-         # when darwin-arm64 lacks a valid signature. It never signs anything.
-         - name: Check darwin code signature
-           if: startsWith(matrix.target, 'darwin-')
-           run: bun scripts/taoeffect/fix-macho-signature.ts "packages/coding-agent/binaries/omp-$TARGET"
          - name: Create release archive
            env:
               ARCHIVE_SUFFIX: ${{ matrix.archive_suffix }}
@@ -188,10 +231,8 @@ jobs:
               if-no-files-found: error
               retention-days: 7
 
-   # Runs each archive on its own OS and CPU. Both darwin archives run on Apple
-   # silicon macos-15: x64 runs under Rosetta, and only macOS 15's Rosetta
-   # translates the AVX2 that the bun-darwin-x64 runtime uses. This job only
-   # runs the binaries; it never signs them.
+   # Runs each archive on its own OS and CPU (darwin-arm64 on Apple silicon
+   # macos-15). This job only runs the binaries; it never signs them.
    smoke:
       name: Smoke ${{ matrix.target }}
       needs: [metadata, build]
@@ -203,7 +244,6 @@ jobs:
             include:
                - { target: linux-x64, os: ubuntu-24.04 }
                - { target: linux-arm64, os: ubuntu-24.04-arm }
-               - { target: darwin-x64, os: macos-15 }
                - { target: darwin-arm64, os: macos-15 }
       env:
          VERSION: ${{ needs.metadata.outputs.version }}
@@ -237,6 +277,25 @@ jobs:
                 exit 1
               fi
               HOME="$work/home" XDG_DATA_HOME="$work/xdg" "$binary" --smoke-test
+              # The binary extracts its addon into <natives dir>/<natives
+              # version>. That folder must carry the fork version: an upstream
+              # omp of the same base version uses the plain one.
+              base="${VERSION%-taoeffect.*}"
+              found=false
+              for natives in "$work/xdg/omp/natives" "$work/home/.omp/natives"; do
+                if [ -e "$natives/$base" ]; then
+                  echo "::error::$name/omp extracted its native addon into $natives/$base, the upstream base version folder"
+                  exit 1
+                fi
+                if compgen -G "$natives/$VERSION/pi_natives.*.node" > /dev/null; then
+                  found=true
+                fi
+              done
+              if [ "$found" != true ]; then
+                echo "::error::$name/omp left no pi_natives.*.node in <natives dir>/$VERSION"
+                find "$work/home" "$work/xdg" -name 'pi_natives.*' || true
+                exit 1
+              fi
 
    release:
       name: Publish GitHub Release and npm package
