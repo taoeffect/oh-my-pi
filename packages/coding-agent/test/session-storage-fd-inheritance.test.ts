@@ -11,12 +11,14 @@
  *
  * Oracle: list the child's descriptor table. `sh -c` is required — a bare `ls`
  * resolves to an in-process builtin, whose `$$` is omp itself. A deliberately
- * inheritable control descriptor (the exact `fs.openSync(path, "a")` the
- * pre-fix writer used) runs in the same child so the assertions cannot pass
- * vacuously. /proc makes this Linux-only; the helper's flag handling is
- * covered on every platform by `packages/utils/test/fs-open.test.ts`.
+ * inheritable control descriptor (the pre-fix writer's `fs.openSync(path, "a")`,
+ * with close-on-exec cleared because Bun ≥1.4.3 sets it like libuv) runs in the
+ * same child so the assertions cannot pass vacuously. /proc makes this
+ * Linux-only; the helper's flag handling is covered on every platform by
+ * `packages/utils/test/fs-open.test.ts`.
  */
 import { afterAll, expect, test } from "bun:test";
+import { dlopen, FFIType } from "bun:ffi";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -27,6 +29,35 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { FileSessionStorage } from "../src/session/session-storage";
 
 const ROOTS: string[] = [];
+
+/** `fcntl(2)` command that replaces a descriptor's flags (`FD_CLOEXEC`). */
+const F_SETFD = 2;
+
+const FCNTL_SYMBOLS = {
+	fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+} as const;
+
+function openLibc() {
+	// glibc first, then the generic soname for musl-style layouts (see process-name.ts).
+	for (const soname of ["libc.so.6", "libc.so"]) {
+		try {
+			return dlopen(soname, FCNTL_SYMBOLS);
+		} catch {}
+	}
+	throw new Error("failed to load libc for fcntl");
+}
+
+/** Opens `filePath` for append the way pre-#13224 Bun did: inheritable across `exec`. */
+function openInheritableSync(filePath: string): number {
+	const fd = fs.openSync(filePath, "a");
+	const libc = openLibc();
+	try {
+		if (libc.symbols.fcntl(fd, F_SETFD, 0) !== 0) throw new Error(`fcntl(F_SETFD) failed for fd ${fd}`);
+	} finally {
+		libc.close();
+	}
+	return fd;
+}
 
 afterAll(async () => {
 	for (const root of ROOTS) await removeWithRetries(root).catch(() => {});
@@ -53,7 +84,7 @@ test.skipIf(process.platform !== "linux")("bash tool children never inherit sess
 	logSink.write("entry");
 
 	const control = path.join(root, "control.jsonl");
-	const controlFd = fs.openSync(control, "a");
+	const controlFd = openInheritableSync(control);
 
 	let output = "";
 	try {
