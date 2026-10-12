@@ -55,6 +55,7 @@
 
 import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { reachesOfficialEndpoint } from "@oh-my-pi/pi-ai/providers/anthropic-state";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	type ImageSize,
 	type ImageTokenization,
@@ -589,6 +590,11 @@ export function providerImageBudget(model: Model | undefined): number {
 /** Archive frame cap for `model`: its image budget, never above {@link MAX_FRAMES_DEFAULT}. */
 export function providerFrameBudget(model: Model | undefined): number {
 	return Math.min(providerImageBudget(model), MAX_FRAMES_DEFAULT);
+}
+
+/** Whether `model` may get a fresh `read` result as frames (catalog `snapcompact-image-reads`, opt-in). */
+export function readerImagesReadResults(model: Model): boolean {
+	return resolveCatalogPolicy(model).snapcompactImageReads === true;
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */

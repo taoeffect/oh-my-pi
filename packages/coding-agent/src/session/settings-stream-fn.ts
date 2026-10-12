@@ -12,6 +12,7 @@
  */
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
@@ -75,8 +76,9 @@ export function createSettingsAwareStreamFn(
 	base: StreamFn = streamSimple,
 	slowModeContext?: SettingsStreamSlowModeContext,
 ): StreamFn {
-	// One tokenizer per reading model, so per-message counts are reused across
-	// requests: its prices (images, replayed thinking) belong to that model.
+	// One tokenizer per reading model and native-history replay state, so
+	// per-message counts are reused across requests: its prices (images,
+	// replayed thinking and reasoning) belong to that model and request state.
 	const tokenizers = new Map<string, Tokenizer>();
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
@@ -131,11 +133,21 @@ export function createSettingsAwareStreamFn(
 		const storeResponses =
 			streamOptions?.storeResponses ??
 			(model.provider === "muse-code" ? cfgProvidersMuseCodeStoreResponses.get(settings) : undefined);
-		const readerKey = `${model.provider}\0${model.api}\0${model.id}`;
-		let tokenizer = tokenizers.get(readerKey);
+		const maxInFlightRequests = validateProviderMaxInFlightRequests(
+			streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
+		);
+		// A cold Responses session rebuilds turns without their encrypted reasoning.
+		// A request that may wait for a provider slot is built when it gets one,
+		// after a concurrent response may have warmed the session, so it is
+		// fitted as replaying.
+		const nativeHistoryReplay =
+			Object.hasOwn(maxInFlightRequests, model.provider) ||
+			openAIResponsesReplaysNativeHistory(model, streamOptions?.providerSessionState);
+		const tokenizerKey = `${model.provider}\0${model.api}\0${model.id}\0${nativeHistoryReplay}`;
+		let tokenizer = tokenizers.get(tokenizerKey);
 		if (!tokenizer) {
-			tokenizer = new Tokenizer(model);
-			tokenizers.set(readerKey, tokenizer);
+			tokenizer = new Tokenizer(model, { nativeHistoryReplay });
+			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
 		const merged: SimpleStreamOptions = {
@@ -148,9 +160,7 @@ export function createSettingsAwareStreamFn(
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
-			maxInFlightRequests: validateProviderMaxInFlightRequests(
-				streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
-			),
+			maxInFlightRequests,
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),
 				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),

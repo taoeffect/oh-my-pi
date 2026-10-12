@@ -117,6 +117,14 @@ class "anthropic" {
 			supports-sampling-params #false
 		}
 	}
+	// Opus 5.5 made every first edit exactly right from `read` results it saw
+	// only as snapcompact frames (24/24); Haiku 5.5 lost leading whitespace
+	// (22/54), so other lines keep `read` as text until measured.
+	family "opus" {
+		revision ">=5.5 <10" {
+			snapcompact-image-reads #true
+		}
+	}
 	family "sonnet" {
 		revision ">=5 <10" {
 			supports-sampling-params #false

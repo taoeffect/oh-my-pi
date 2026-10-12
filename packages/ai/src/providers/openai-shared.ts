@@ -2064,7 +2064,7 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
  * Summary-only reasoning keeps the rebuild: it is no evidence of a server that
  * returns plaintext reasoning.
  */
-function isColdReplayableResponsesTurn(items: ResponseInput): boolean {
+export function isColdReplayableResponsesTurn(items: ResponseInput): boolean {
 	let hasReasoning = false;
 	for (const item of items) {
 		if ("id" in item && typeof item.id === "string") return false;

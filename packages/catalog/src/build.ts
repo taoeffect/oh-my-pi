@@ -351,8 +351,9 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const model: Model<TApi> = {
 		...spec,
 		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
-		// `reasoning: false` discovery default (see `resolveThinkingPolicy`);
-		// materialize the correction for transports and the picker.
+		// `reasoning: false` discovery default, and an unclassified neutral spec
+		// gets an unverified ladder (see `resolveThinkingPolicy`); materialize
+		// either for transports and the picker.
 		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,

@@ -4726,7 +4726,9 @@ function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undef
 	let templateRevision: readonly [number, number, number] | undefined;
 	for (const model of seedModels<"openai-responses">("meta")) {
 		if ((billingVariantPlain(model.id) !== undefined) !== contributor) continue;
-		const candidate = parseRevision(classifyModel("meta", model.id, { lenient: true }).revision ?? "");
+		const seedIdentity = classifyModel("meta", model.id, { lenient: true });
+		if (seedIdentity.family !== "muse-spark") continue;
+		const candidate = parseRevision(seedIdentity.revision ?? "");
 		if (candidate === undefined) continue;
 		if (templateRevision === undefined || compareRevision(candidate, templateRevision) > 0) {
 			template = model;

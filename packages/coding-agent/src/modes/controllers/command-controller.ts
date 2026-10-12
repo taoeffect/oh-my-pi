@@ -1474,8 +1474,14 @@ export class CommandController {
 			const activeThinkingLevel = this.ctx.session.configuredThinkingLevel();
 			if (activeThinkingLevel !== undefined) childArgs.push("--thinking", activeThinkingLevel);
 			// Forcing --model/--thinking marks the fork's cache shape as changed, which would
-			// drop the inherited key; pin what the parent's requests populated the cache under.
-			childArgs.push("--prompt-cache-key", this.ctx.session.agent.promptCacheKey ?? this.ctx.session.sessionId);
+			// drop the inherited key. Automatic candidates travel in the source header;
+			// forwarding them as --prompt-cache-key would bypass their model gate.
+			if (
+				this.ctx.session.agent.promptCacheKey !== undefined ||
+				this.ctx.sessionManager.getHeader()?.taskPromptCacheKey === undefined
+			) {
+				childArgs.push("--prompt-cache-key", this.ctx.session.agent.promptCacheKey ?? this.ctx.session.sessionId);
+			}
 			childArgs.push("--fork", sourceSessionFile);
 			// Pin only non-secret scope variables.
 			const command = [

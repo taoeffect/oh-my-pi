@@ -285,7 +285,11 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.kind = patch.kind;
 		result.kindConfig = patch.kind;
 	}
-	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
+	if (patch.reasoning !== undefined) {
+		result.reasoning = patch.reasoning;
+		// A configured capability replaces the catalog's unverified guess.
+		if (result.thinking?.unverified) delete result.thinking;
+	}
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;

@@ -85,6 +85,12 @@ const setResume: OptionalSetter = (result, value) => {
 	result.resume = value !== undefined ? value : true;
 };
 
+/** `--restore` selects its session exactly as `--resume` does, then goes on with it. */
+const setRestore: OptionalSetter = (result, value) => {
+	setResume(result, value);
+	result.restore = true;
+};
+
 const MAX_TIME_DURATION_RE = /^(\d+(?:\.\d+)?)([smh])$/;
 
 function maxTimeMultiplier(unit: string | undefined): number {
@@ -253,6 +259,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 export const OPTIONAL_FLAGS: Record<string, OptionalFlagConfig> = {
 	"--resume": { set: setResume, rejectEmpty: true },
 	"-r": { set: setResume, rejectEmpty: true },
+	"--restore": { set: setRestore, rejectEmpty: true },
 	"--session": { set: setResume, rejectEmpty: true },
 };
 
@@ -378,6 +385,7 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
 const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--resume": true,
 	"-r": true,
+	"--restore": true,
 	"--session": true,
 	"--continue": true,
 	"-c": true,

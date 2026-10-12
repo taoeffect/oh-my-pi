@@ -70,11 +70,11 @@ export class TanCommandController {
 		}
 
 		const parentSessionId = session.sessionId;
-		// Providers route on `promptCacheKey ?? sessionId`, so the parent's live
-		// requests may cache under a pinned key that differs from its session id
-		// (the parent being itself a fork/tan). Mirror exactly what the parent
-		// populated the cache under — same rule as advisor and handoff calls.
-		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
+		// Explicit keys stay pinned; automatic candidates must remain model-gated
+		// if the clone later switches models or falls back during authentication.
+		const taskPromptCacheKey = this.ctx.sessionManager.getHeader()?.taskPromptCacheKey;
+		const parentPromptCacheKey =
+			session.agent.promptCacheKey ?? (taskPromptCacheKey === undefined ? parentSessionId : undefined);
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
 		const toolNames = session.getEnabledToolNames();
@@ -158,6 +158,7 @@ export class TanCommandController {
 								toolNames,
 								providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
 								providerPromptCacheKey: parentPromptCacheKey,
+								taskPromptCacheKey,
 								modelRegistry,
 								authStorage: modelRegistry.authStorage,
 								settings,

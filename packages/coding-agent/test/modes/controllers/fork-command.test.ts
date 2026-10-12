@@ -64,6 +64,7 @@ function createContext(
 	};
 	const flush = vi.fn(async () => undefined);
 	const sessionManager = {
+		getHeader: vi.fn(() => undefined),
 		getCwd: vi.fn(() => options.cwd ?? "/workspace/project"),
 		getSessionFile: vi.fn(() => sessionFile),
 		isSessionOnDisk: vi.fn(() => sessionFile !== undefined),

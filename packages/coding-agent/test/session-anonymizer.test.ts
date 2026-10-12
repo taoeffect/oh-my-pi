@@ -23,6 +23,7 @@ describe("SessionAnonymizer", () => {
 				id: "01a0c9ac-8c2d",
 				timestamp: "2026-09-22T15:12:03.629Z",
 				cwd: "/home/alice/acme",
+				taskPromptCacheKey: "customer-acme:reviewer",
 			},
 			{
 				type: "message",
@@ -129,6 +130,7 @@ describe("SessionAnonymizer", () => {
 		expect(at(usageEntry, "errorMessage")).toMatch(/^400 \[redacted #\d+: \d+ chars, 1 line\]$/);
 		expect(at(ttsr, "injectedRules")).toEqual([expect.stringMatching(/^PLACEHOLDER_\d+$/)]);
 		expect(header).toMatchObject({ type: "session", id: "01a0c9ac-8c2d", timestamp: "2026-09-22T15:12:03.629Z" });
+		expect(at(header, "taskPromptCacheKey")).toMatch(/^\[redacted #\d+: 22 chars, 1 line\]$/);
 		const cwd = String(at(header, "cwd"));
 		expect(cwd).toMatch(/^\/home\/seg\d+\/seg\d+$/);
 

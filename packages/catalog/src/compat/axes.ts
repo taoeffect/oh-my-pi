@@ -329,6 +329,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-suppress-when-off": { key: "suppressWhenOff", set: "thinking", shape: "scalar" },
 	"thinking-supports-display": { key: "supportsDisplay", set: "thinking", shape: "scalar" },
 	"thinking-upgrade-neutral": { key: "upgradeNeutral", set: "thinking", shape: "scalar" },
+	/** Unclassified neutral ids here are capability-unknown: offer the ladder as opt-in. */
+	"thinking-unverified": { key: "unverified", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
 	"apply-patch-tool-type": {
@@ -429,6 +431,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * `ANTHROPIC_BASE_URL`/`FOUNDRY_BASE_URL` reroute (proxy, gateway) need not share.
 	 */
 	"official-image-count-budget": { key: "officialImageCountBudget", set: "catalog", shape: "scalar" },
+	/**
+	 * Opt-in: the reader may get a fresh `read` result as snapcompact frames
+	 * (`snapcompact.toolResults`), because it edits as exactly from frames as
+	 * from text. Unassigned: `read` results stay text, since a reader that
+	 * misreads indentation in frames makes inexact edits.
+	 */
+	"snapcompact-image-reads": { key: "snapcompactImageReads", set: "catalog", shape: "scalar", values: [true, false] },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	/** Longest image edge the host passes to the model: it downscales larger images to fit first. */
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
@@ -441,6 +450,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
+	"task-sibling-prompt-cache": {
+		key: "taskSiblingPromptCache",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	/**
 	 * Prompt-cache lookback in block positions: how far back from a cache
 	 * breakpoint the provider looks for an earlier request's cache entry.
