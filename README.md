@@ -47,7 +47,7 @@ Newer npm versions skip install scripts unless you allow them. If the install sk
 
 On a Mac, `node -p process.arch` must print `arm64`. An x64 Node.js, for example one from an old Intel Homebrew install, runs under Rosetta 2 and asks for an Intel Mac binary. The fork has none, so both paths fail with `has no omp binary for darwin-x64`. Install an arm64 Node.js, or use the manual install below.
 
-Fork releases use versions such as `18.4.9-taoeffect.1`: `18.4.9` is the newest upstream omp release that the fork contains, and `taoeffect.1` identifies this fork's release iteration. A fork release can also contain later upstream changes that upstream has not released yet. `omp update` updates the fork from `@taoeffects/omp`, never from upstream omp.
+Fork releases use versions such as `18.4.9-taoeffect.1`: `18.4.9` is the newest upstream omp release that the fork contains, and `taoeffect.1` identifies this fork's release iteration. A fork release can also contain later upstream changes that upstream has not released yet. `omp update` updates the fork from `@taoeffects/omp`, never from upstream omp. The startup check and `omp update` also check upstream omp releases. When upstream has released a version newer than the newest fork release contains, they tell you to wait for a matching fork release.
 
 **Manual install (no npm)**
 
@@ -84,6 +84,8 @@ The methods below install upstream omp from [can1357/oh-my-pi](https://github.co
 curl -fsSL https://omp.sh/install | sh
 ```
 
+Without a usable bun (or with `--binary`), the install scripts fetch the prebuilt binary from `build.stencil.so` and check its SHA-256 before installing it. Pin a release with `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` (PowerShell: `-Binary -Ref v<version>`).
+
 > **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
 
 **Homebrew**
@@ -104,8 +106,8 @@ bun install -g @oh-my-pi/pi-coding-agent
 # Run without installing
 nix run github:can1357/oh-my-pi
 
-# Or install into the active profile
-nix profile install github:can1357/oh-my-pi
+# Or install into the active profile (Nix < 2.30: `nix profile install`)
+nix profile add github:can1357/oh-my-pi
 ```
 
 Flake consumers can use `packages.<system>.omp`, `overlays.default`, `nixosModules.default`, or `homeManagerModules.default`. A Home Manager configuration can install OMP and own its settings declaratively:
@@ -425,7 +427,7 @@ modelRoles:
 
 ### Four knobs that make routing useful
 
-- **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, `google-vertex`, `typesafe`, or `openrouter-decisions` (the two judge APIs) in `~/.omp/agent/models.yml`.
+- **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, `google-vertex`, `typesafe`, `openrouter-decisions`, `openai-decisions`, or `workers-ai-systemone` (the judge APIs) in `~/.omp/agent/models.yml`.
 - **Fallback chains** — Per-role or per-model chains under `retry.fallbackChains`. When the primary throws 429s or hits a quota wall, the next entry takes the rest of the turn — restored on cooldown.
 - **Path-scoped models** — Scope `enabledModels` and `disabledProviders` entries to a `path:` prefix to pin a different model set on one repo without touching the global config. Scoped entries cover the path and everything under it.
 - **Round-robin credentials** — Stack API keys per provider and the runtime rotates with session affinity and per-credential backoff. Useful when one key would burn its quota by lunch.

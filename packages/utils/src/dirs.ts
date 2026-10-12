@@ -865,6 +865,15 @@ export function getFastembedRuntimeDir(): string {
 	return dirs.rootSubdir(path.join("cache", "fastembed-runtime"), "cache");
 }
 
+/**
+ * Get the directory the native addon loads downloaded tree-sitter wasm grammars
+ * from (`<natives dir>/grammars`, ~/.omp/natives/grammars). The natives loader
+ * configures the addon with the same path.
+ */
+export function getNativeGrammarsDir(): string {
+	return path.join(getNativesDir(), "grammars");
+}
+
 /** Get the natives directory. PI_NATIVES_DIR overrides the usual cache root; relative values are ignored. */
 export function getNativesDir(): string {
 	return resolveAbsoluteDir(process.env.PI_NATIVES_DIR) ?? dirs.rootSubdir("natives", "cache");
@@ -1071,6 +1080,11 @@ export function getSecretPlaceholderKeyPath(): string {
 /** Directory holding the per-model tiny-worker sockets and logs (~/.omp/run/tiny; XDG default: $XDG_STATE_HOME/omp/run/tiny). */
 export function getTinyWorkerRuntimeDir(): string {
 	return dirs.rootSubdir(path.join("run", "tiny"), "state");
+}
+
+/** Directory holding the per-model mnemopi embedding server endpoints and logs (~/.omp/run/mnemopi; XDG default: $XDG_STATE_HOME/omp/run/mnemopi). */
+export function getMnemopiEmbedRuntimeDir(): string {
+	return dirs.rootSubdir(path.join("run", "mnemopi"), "state");
 }
 
 /** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */

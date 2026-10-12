@@ -68,7 +68,6 @@ function createPsTopHost(): PsTopHost {
 		const cached = clients.get(scope.runtimeDir);
 		if (cached) return cached;
 		const client = await scopeClient(scope);
-		if (!client) throw new Error("Scope is not addressable from this machine");
 		if (closed) {
 			client.close();
 			throw new Error("Process monitor closed");

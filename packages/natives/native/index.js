@@ -31,6 +31,8 @@ export const EditSession = nativeBindings.EditSession;
 export const EditStore = nativeBindings.EditStore;
 export const FileLock = nativeBindings.FileLock;
 export const HighlightStream = nativeBindings.HighlightStream;
+export const IpcConnection = nativeBindings.IpcConnection;
+export const IpcServer = nativeBindings.IpcServer;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback;
@@ -46,10 +48,12 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
+export const __ompSetGrammarDir = nativeBindings.__ompSetGrammarDir ?? missingNativeExport("__ompSetGrammarDir");
 export const __piNativesBuildVersion = nativeBindings.__piNativesBuildVersion;
 export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
 export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
 export const appleFmGenerate = nativeBindings.appleFmGenerate ?? missingNativeExport("appleFmGenerate");
+export const applyBinaryPatch = nativeBindings.applyBinaryPatch ?? missingNativeExport("applyBinaryPatch");
 export const astEdit = nativeBindings.astEdit ?? missingNativeExport("astEdit");
 export const astGrep = nativeBindings.astGrep ?? missingNativeExport("astGrep");
 export const astMatch = nativeBindings.astMatch ?? missingNativeExport("astMatch");
@@ -93,6 +97,7 @@ export const hasMatch = nativeBindings.hasMatch ?? missingNativeExport("hasMatch
 export const highlightCode = nativeBindings.highlightCode ?? missingNativeExport("highlightCode");
 export const htmlToMarkdown = nativeBindings.htmlToMarkdown ?? missingNativeExport("htmlToMarkdown");
 export const invalidateFsScanCache = nativeBindings.invalidateFsScanCache ?? missingNativeExport("invalidateFsScanCache");
+export const ipcEndpoint = nativeBindings.ipcEndpoint ?? missingNativeExport("ipcEndpoint");
 export const isoBackend = nativeBindings.isoBackend ?? missingNativeExport("isoBackend");
 export const isoDiff = nativeBindings.isoDiff ?? missingNativeExport("isoDiff");
 export const isoIsUnavailableError = nativeBindings.isoIsUnavailableError ?? missingNativeExport("isoIsUnavailableError");
@@ -142,6 +147,7 @@ export const vectorIndexTopK = nativeBindings.vectorIndexTopK ?? missingNativeEx
 export const visibleWidth = nativeBindings.visibleWidth ?? missingNativeExport("visibleWidth");
 export const warmBlockParse = nativeBindings.warmBlockParse ?? missingNativeExport("warmBlockParse");
 export const warmHighlighter = nativeBindings.warmHighlighter ?? missingNativeExport("warmHighlighter");
+export const wasmGrammarFor = nativeBindings.wasmGrammarFor ?? missingNativeExport("wasmGrammarFor");
 export const wrapTextWithAnsi = nativeBindings.wrapTextWithAnsi ?? missingNativeExport("wrapTextWithAnsi");
 
 // string/numeric enums (napi-rs string_enum produces TS-only const enum)

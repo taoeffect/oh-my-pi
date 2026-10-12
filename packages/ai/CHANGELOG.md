@@ -2,6 +2,178 @@
 
 ## [Unreleased]
 
+## [18.10.2] - 2026-10-12
+
+### Added
+
+- Added support for `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` on the `anthropic` provider: when set, requests omit pre-release fields (`context_management`, beta tool fields such as `strict` and `defer_loading`, task budgets, structured-output format, `thinking.block_binding`, and Anthropic server compaction) along with their beta headers, so `ANTHROPIC_BASE_URL` gateways that reject them keep working ([#15458](https://github.com/can1357/oh-my-pi/pull/15458) by [@H4vC](https://github.com/H4vC))
+### Breaking Changes
+
+- `isOfficialCodexApiUrl` moved from `@oh-my-pi/pi-ai` to `@oh-my-pi/pi-catalog/wire/codex`, next to `CODEX_BASE_URL`, so the catalog's compat resolver classifies Codex endpoints with the same check ([#15434](https://github.com/can1357/oh-my-pi/pull/15434) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Added
+
+- Added `reachesOfficialEndpoint(model)`: whether a request to the model reaches the official endpoint its compat was built for, following `ANTHROPIC_BASE_URL` and Foundry's `FOUNDRY_BASE_URL` reroutes of first-party Anthropic models ([#15434](https://github.com/can1357/oh-my-pi/pull/15434) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Claude on Google Antigravity failing every turn with "image exceeds 5 MB maximum" once a large image entered the conversation; images are now downscaled to the host's limits before sending, as on the Anthropic API ([#15444](https://github.com/can1357/oh-my-pi/pull/15444) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added `AssistantMessage.elidedOutputTokens`, the visible output tokens a history rewrite (shake) has removed from the turn, which `usage.output` still counts ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.9.2] - 2026-10-11
+
+### Breaking Changes
+
+- Renamed `TypeSafeJudge` to `NativeJudge` and `TypeSafeApiError` to `JudgmentApiError`, including their associated option types. `JUDGMENT_ROUTES` has been removed; use `isJudgmentApi` or create a judge for catalog models with `createNativeJudge(model, { apiKey })`.
+
+### Added
+
+- Added native judge support for OpenAI’s Decisions API and Cloudflare Workers AI decision models, including the `openai-decisions` and `workers-ai-systemone` APIs. The auth gateway’s System One route supports both providers.
+- Added `createNativeJudge(model, { apiKey, headers, fetch })` for creating judges from catalog models with their configured request model IDs and question limits.
+- Added Cloudflare Workers AI authentication with `loginCloudflareWorkersAi`, storing the API token and account ID; logging in again with the same token replaces the existing credential.
+- Added automatic question batching to `NativeJudge` for endpoints with question limits, with up to four concurrent batches and merged answers and usage reporting. Usage from successful batches is reported through partial-usage callbacks and both session and auth-gateway usage ledgers, even if another batch fails.
+
+### Changed
+
+- Improved Anthropic prompt caching for long conversations, reducing memory usage while selecting cache breakpoints.
+
+### Fixed
+
+- Fixed Devin-routed OpenAI models returning `invalid_argument` on every turn after an existing session was switched from `openai-codex`.
+
+## [18.9.1] - 2026-10-11
+
+### Added
+
+- Added `compat.supportsThinkingBindingControls` for Bedrock Converse: setting it to `false` stops prefix-bound Claude requests from sending `thinking.block_binding`, the `thinking-binding-controls-2026-08-01` beta and the `/input_transformations` response path, for gateways or regions that reject them ([#15316](https://github.com/can1357/oh-my-pi/pull/15316) by [@harshaygadekar](https://github.com/harshaygadekar))
+
+### Fixed
+
+- Fixed Bedrock Claude Fable 5.1 requests with thinking off and a forced tool choice sending the forced choice next to adaptive thinking; the choice now falls back to `auto` ([#15316](https://github.com/can1357/oh-my-pi/pull/15316) by [@harshaygadekar](https://github.com/harshaygadekar))
+
+## [18.9.0] - 2026-10-11
+
+### Breaking Changes
+
+- Removed the `retainTextSignature` option from `consumeGoogleStream` and `streamGoogleGenAI`; Google routes now consistently preserve text reply signatures.
+- Custom `SessionsApi` implementations must implement `permits(provider, sessionId, credentialId)`.
+
+### Added
+
+- Exported `matchesReplacementCredential` and `isSameOAuthAccount` to help identify credential replacement and account ownership.
+- Added `AuthStorage.sessions.permits(provider, sessionId, credentialId)` for checking whether a stored account may serve a session restricted to an account pool.
+- Added `judgeQuestions()` for loading judge questions from JSON with inferred choice labels and answer types, plus `renderQuestion()` for templated instructions.
+
+### Changed
+
+- Devin chat turns now use the native Devin CLI sampling settings by default, while continuing to honor explicitly configured temperature, top-p, and stop sequences.
+- Added `parentSessionId` and `minimizeEffort` stream options. Branched side requests can reuse a conversation's prompt cache, and supported models can run them at their lowest effort without losing cache reuse.
+- Improved cross-host continuation for supported models so confirmed prior reasoning is preserved as reasoning context rather than exposed as `<think>` text in replies.
+
+### Fixed
+
+- Fixed Anthropic subscription quota not appearing in `/usage` when an OAuth token is supplied through `ANTHROPIC_API_KEY`.
+- Fixed custom OpenAI-compatible Responses streams truncating reasoning and incorrectly invoking custom tools with empty input.
+- Fixed Codex WebSocket prewarming so optional service tiers and model routing are handled consistently with normal requests.
+- Fixed OAuth sign-in result pages breaking or rendering injected markup when provider errors or callback values contain special characters.
+- Fixed Anthropic requests failing when tools are added to a conversation or when resumed sessions no longer include earlier tools.
+- Fixed Anthropic requests rejecting tall or oversized historical screenshots by resizing or re-encoding images to the host's limits.
+- Improved compatibility with Anthropic-compatible endpoints that reject prompt-cache options by retrying without unsupported caching features and reporting the disabled capability.
+- LiteLLM proxy logs now group requests by omp conversation instead of displaying a separate session for each request.
+- Fixed Gemini-family integrations echoing prior thinking as visible fenced `thinking` blocks; thinking is now restored as model reasoning across Google, Vertex, Antigravity, Gemini CLI, and Factory Droid routes.
+- Fixed Gemini-family integrations losing text reply signatures needed for subsequent requests across Google, Vertex, Antigravity, Gemini CLI, and Factory Droid routes.
+- Fixed Cursor integrations losing previously recorded reasoning, including signed and redacted reasoning, when continuing or resuming a conversation.
+- Fixed invalid `auth.accountPolicies` entries referring to unavailable accounts from preventing startup, account selection, or login; such entries are now skipped with a warning.
+- Fixed Factory Droid Claude turns with thinking disabled from replaying unsupported earlier thinking blocks, and aligned high-effort Sonnet 5.5 thinking behavior with the native client.
+- Fixed side requests for GPT-6 Responses and Codex models from losing prompt-cache context or applying unsupported reasoning-effort configuration changes.
+
+## [18.8.9] - 2026-10-10
+
+### Changed
+
+- Updated state field rendering to trim trailing whitespace and normalize empty collection formatting for consistent prompt output
+
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed OpenAI Responses and Codex tool calls running with empty `{}` arguments when a compatible host or proxy ends the call with an empty arguments payload after streaming the real ones ([#15099](https://github.com/can1357/oh-my-pi/pull/15099) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed truncated Factory Droid Gemini responses ending as a hard error or a half-received tool call instead of being retried ([#15103](https://github.com/can1357/oh-my-pi/pull/15103) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Gemini ignoring an error the server reports mid-response, which hid its status and retried errors that cannot succeed ([#15103](https://github.com/can1357/oh-my-pi/pull/15103) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed resumed OpenAI Responses sessions (xAI, Factory Droid, OpenAI and other hosts) dropping all earlier encrypted reasoning on their first request; GitHub Copilot still rebuilds history until its first response ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
+
+### Fixed
+
+- Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
+- Fixed `/session pin` being ignored when every stored account is quota-blocked, which routed the next request to a different exhausted account instead of the pinned one ([#14997](https://github.com/can1357/oh-my-pi/issues/14997)).
+- Fixed `minimax-code-cn` sessions staying pinned to a key whose Token Plan quota is exhausted (`用量上限` 429) instead of rotating to a sibling credential ([#15053](https://github.com/can1357/oh-my-pi/issues/15053)).
+
+## [18.8.6] - 2026-10-08
+
+### Fixed
+
+- Fixed Google Gemini and Cloud Code Assist (Antigravity) requests failing when tool schemas contain unsupported JSON Schema keywords or fields that allow multiple types.
+- Fixed auth broker account selection and usage-limit enforcement to consistently use the selected account’s quota when multiple accounts are present.
+- Fixed Anthropic-family model streaming so encoded marker tokens are decoded correctly in text, tool-call updates, partial messages, and completed tool calls.
+
+## [18.8.5] - 2026-10-08
+
+### Added
+
+- `oauth.refresh(id, signal, { reason: "auth-recovery" })` forwards provider-401 recovery intent to a delegated (auth broker) refresh, and `AuthStorageOptions.refreshOAuthCredentialMints` marks a `refreshOAuthCredential` hook that exchanges tokens itself so its tokens are reused for auth recovery ([#14752](https://github.com/can1357/oh-my-pi/pull/14752) by [@will-bogusz](https://github.com/will-bogusz))
+- `SessionsApi.inherit` accepts an optional filter, called with each provider and whether the source's affinity is an explicit user pin, to copy only the affinities it accepts ([#14749](https://github.com/can1357/oh-my-pi/pull/14749) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- `AuthApiKeyOptions.accountIds` also matches the login email, or else the project id, of credentials that carry no account id (see `oauthAccountKey`), so Antigravity requests prefer accounts that serve the requested model ([#14924](https://github.com/can1357/oh-my-pi/issues/14924)).
+
+### Fixed
+
+- Fixed accounts sitting exactly at their `reservePct` (e.g. 70% used with a 30% reserve) still being picked and reported healthy instead of being held in reserve ([#14765](https://github.com/can1357/oh-my-pi/pull/14765) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `oauth.accessById` with `forceRefresh` returning the stored token unchanged while it was still valid; it now re-mints that one account (through the auth broker when configured) and returns that account's token even if another row is removed meanwhile ([#14752](https://github.com/can1357/oh-my-pi/pull/14752) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `omp -p` and other short-lived auth-broker clients missing from `omp usage clients`: usage still waiting for the 10-second report batch is now sent to the broker before the process exits ([#14899](https://github.com/can1357/oh-my-pi/pull/14899) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Cursor web fetches that were cut off by a dropped connection disappearing from resumed and rebuilt sessions; they now show as interrupted ([#14819](https://github.com/can1357/oh-my-pi/pull/14819) by [@jchanghong023](https://github.com/jchanghong023))
+- Anthropic hosted web search can honor custom providers' OAuth-style request shaping and configured headers consistently with conversations ([#14919](https://github.com/can1357/oh-my-pi/pull/14919) by [@farnoy](https://github.com/farnoy))
+
+## [18.8.4] - 2026-10-08
+
+### Breaking Changes
+
+- `AuthBrokerClient.notifyUsageStale` and `UsageLedgerStore.invalidateUsageCache` (including `RemoteAuthCredentialStore.invalidateUsageCache`) now take an optional leading `provider` argument: the signature is `(provider?: string, signal?: AbortSignal)` instead of `(signal?: AbortSignal)` ([#14761](https://github.com/can1357/oh-my-pi/pull/14761) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Added
+
+- Auth gateway route option `excludeProviders` leaves those providers' accounts out of `/v1/usage` and `/v1/credentials/check` ([#14755](https://github.com/can1357/oh-my-pi/pull/14755) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed a single-provider usage refresh from an auth broker client (`omp usage invalidate --provider`, Codex auto-redeem, a saved-reset redeem) wiping the broker's cached usage for every provider, so other accounts showed no usage on every client until their next successful probe ([#14761](https://github.com/can1357/oh-my-pi/pull/14761) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic sessions missing the prompt cache a second time after the API dropped thinking blocks from a changed conversation ([#14748](https://github.com/can1357/oh-my-pi/pull/14748) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Cursor logins never renewing: every refresh was rejected with "Invalid User API Key", so logins lapsed about 60 days after sign-in; a session Cursor has ended is now disabled with a re-login hint ([#14753](https://github.com/can1357/oh-my-pi/pull/14753) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the auth broker logging caller-supplied `X-Forwarded-For` / `X-Real-IP` values and unknown request paths; peers come from the socket unless `trustProxyHeaders` is set ([#14762](https://github.com/can1357/oh-my-pi/pull/14762) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed false thinking-loop detections on Gemini, DeepSeek, and Grok when the model drafts or answers with repetitive code or markup (VRML, SVG, JSON); such output is no longer discarded and retried.
+- Fixed Cursor provider leaking conversation checkpoints, blob stores and abort listeners after requests end ([#14669](https://github.com/can1357/oh-my-pi/pull/14669) by [@H4vC](https://github.com/H4vC))
+- Fixed session-affinity pins growing without bound in long-lived gateways (now capped at 256 sessions per provider) ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
+- Fixed completed Cursor turns failing with "Cursor stream ended before turnEnded" when the connection closed after the answer had fully arrived ([#14851](https://github.com/can1357/oh-my-pi/pull/14851) by [@kyle-elliott-asymptote](https://github.com/kyle-elliott-asymptote)).
+- Fixed Cursor provider errors that Cursor marks as not retryable being retried until the retry budget ran out ([#14851](https://github.com/can1357/oh-my-pi/pull/14851) by [@kyle-elliott-asymptote](https://github.com/kyle-elliott-asymptote)).
+
+## [18.8.3] - 2026-10-07
+
+### Added
+
+- Added `OAuthRefreshUnavailableError`, a retryable error that `keys.getWithCredential` and `oauth.access` reject with when every usable OAuth credential failed to refresh transiently; `keys.get` resolves `undefined` instead so availability probes move on to their next candidate ([#14843](https://github.com/can1357/oh-my-pi/pull/14843) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed a single transient OAuth token-refresh failure (network blip, timeout, 5xx) ending a running session, including subagents restricted to an account pool, with a non-retryable "No API key for provider" error while the stored credential was still valid; the refresh error now surfaces and the request is retried ([#14843](https://github.com/can1357/oh-my-pi/pull/14843) by [@H4vC](https://github.com/H4vC))
+
 ## [18.8.1] - 2026-10-07
 
 ### Added
@@ -2178,186 +2350,4 @@
 - Fixed OpenCode Go usage reporting to synthesize `/usage` limits from OMP-observed request costs for the 5h, weekly, and monthly provider caps. ([#2942](https://github.com/can1357/oh-my-pi/issues/2942))
 - Fixed MiniMax Anthropic-compatible requests to serialize adaptive thinking without an invalid Anthropic `output_config.effort` tier ([#2928](https://github.com/can1357/oh-my-pi/issues/2928)).
 
-## [16.0.6] - 2026-06-18
-
-### Added
-
-- Added support for ArkType schemas as tool parameters alongside existing Zod schemas
-- Added `getOpenRouterHeaders` utility to export standard OpenRouter integration headers
-
-### Changed
-
-- Expanded thinking loop detection guard to also cover DeepSeek models (family, provider, or id matches).
-- Extended loop guard to monitor assistant response prose (via `text_delta` events) in addition to thinking logs, customizable via request options.
-- Modified loop guard error reporting to emit a non-retryable partial content block containing the accumulated streamed text if a loop is detected after response prose has started streaming, preventing unsafe agent session rollbacks.
-- Migrated internal wire-schema validation (auth-broker, Anthropic Messages request, OpenAI Chat/Responses requests, and /v1/usage shapes) from Zod to ArkType
-- Replaced the dedicated `xai-responses` provider with a unified `openai-responses` path that handles xAI-specific reasoning effort stripping dynamically
-- Updated OpenAI Responses stream handling to throw a clearer error message when a stream closes without a terminal response event
-- Consolidated shared OpenAI-compatible routing and strict-tool fallback helpers across Chat Completions and Responses providers.
-- Consolidated the OpenAI-family provider stack: merged `openai-responses-shared` into `openai-shared` and removed the now-dead `openai-responses-shared` re-export shim; folded the three duplicated `service_tier` request blocks and the per-provider wire model-id transform into shared `applyOpenAIServiceTier`/`applyWireModelIdTransform` helpers; moved residual provider-name wire-quirk checks (DeepSeek special-token strip, cumulative reasoning deltas, Ollama empty-length context error, OpenAI tool-call-id cap, Fireworks thinking drop, OpenRouter/OpenAI Responses request fields) into resolved compat fields; shared the Responses stream per-block accumulation helpers plus the terminal pending-tool-call finalization (`finalizePendingResponsesToolCalls`) and toolUse/pause stop-reason promotion (`promoteResponsesToolUseStopReason`) between `processResponsesStream` and the Codex stream handler; and removed the redundant `getOpenAIResponsesCacheSessionId` alias in favor of `getOpenAIResponsesPromptCacheKey`.
-- Centralized OpenAI-family request-param policy into shared `resolveOpenAIOutputTokenParam` (output-token field selection, OpenRouter default-cap omission, `alwaysSendMaxTokens` defaulting, model/provider clamp), `applyOpenAIGatewayRouting` (OpenRouter `provider` + Vercel AI Gateway `providerOptions`), and `applyOpenAIExtraBody` (extra-body merge + Fireworks thinking drop) helpers used by both Chat Completions and Responses `buildParams`, and moved the Chat Completions reasoning/thinking dialect dispatch (`applyChatCompletionsReasoningParams` + `disableChatCompletionsReasoningForDialect`) plus the `OpenAICompletionsParams` request type into `openai-shared` alongside `applyResponsesReasoningParams`. As a consistency consequence, direct `streamOpenAIResponses` calls (bypassing `streamSimple`) now emit `max_output_tokens` for `alwaysSendMaxTokens` (Kimi-family) models even without a caller cap — matching Chat Completions and the value `streamSimple` already supplied.
-- Centralized OpenAI-family reasoning compat resolution behind a shared `resolveOpenAICompatPolicy` consumed by both Chat Completions and Responses request builders. Shared policy now drives tool-choice reasoning suppression, dialect-specific disable encoding, reasoning-history replay filters, encrypted-reasoning inclusion, Mistral/OpenAI tool-call-id modes, stream healing/DeepSeek token stripping, and xAI/OpenRouter cache-affinity wiring instead of endpoint-local provider/model checks.
-
-### Fixed
-
-- Fixed OpenAI Responses cost accounting to apply standard service-tier pricing multipliers (flex 0.5×, priority 2×) to the calculated cost based on the served (or requested) service tier for provider `"openai"` models.
-- Fixed OpenAI Chat Completions to consume the dedicated `requiresReasoningContentForAllAssistantTurns` compatibility flag, preventing unnecessary reasoning replay on non-tool-call turns for OpenRouter DeepSeek and OpenCode models.
-- Fixed the Kimi Code and Synthetic dual-surface shim (`streamOpenAIAnthropicShim`) to correctly forward caller-supplied `toolChoice`, `serviceTier`, and `disableReasoning` options.
-- Fixed the OpenAI Responses tool-choice compatibility helper to drop `tool_choice` when `supportsToolChoice` is false, and downgrade forced choices to `"auto"` when `supportsForcedToolChoice` is false.
-- Fixed Azure Responses to avoid emitting `tool_choice: "none"` when `context.tools` is empty.
-- Fixed Kimi via OpenRouter forced-tool requests to omit the OpenRouter `reasoning` object instead of sending `reasoning: { enabled: false }`, preserving the generic OpenRouter explicit-disable behavior while avoiding Kimi's forced-tool reasoning conflict.
-- Fixed Google Gemini CLI credential parsing schema to gracefully handle empty or unexpected non-string shapes without throwing unhandled exceptions
-- Fixed Google Gemini CLI credential parsing to correctly prioritize `projectId` over `project_id` even when empty, and drop non-string values gracefully
-- Fixed OpenRouter Responses requests to omit default max token fields unless an explicit caller cap is provided, preventing upstream filtering issues
-- Fixed Chat Completions reasoning suppression (`disableReasoningOnToolChoice` / `disableReasoningOnForcedToolChoice`) to turn thinking off symmetrically across every dialect via a shared `disableChatCompletionsReasoningForDialect` helper. Previously the conflict path only deleted `reasoning_effort`/`reasoning` (and set Z.AI `thinking: { type: "disabled" }` on the forced branch alone), leaving Qwen `enable_thinking`, Qwen chat-template `chat_template_kwargs.enable_thinking`, and OpenRouter nested `reasoning` enabled — so those hosts could keep thinking on under forced/required tool choice and re-trip the incompatibility the policy guards against. OpenRouter is now set to `{ reasoning: { enabled: false } }` (not deleted, which OpenRouter treats as default-on).
-- Fixed OpenRouter Responses requests to send `session_id` from `sessionId` in the request body for sticky provider routing and observability grouping.
-- Fixed OpenRouter Responses request shaping to preserve provider routing, variant suffixes, caller header overrides, and strict-tool fallback behavior while omitting only unsafe default max-token caps.
-- Fixed OpenAI Responses stateful chaining so a non-ZDR stale `previous_response_id` retry keeps `store: true`: the full-context retry stays chainable on the next turn and the consecutive stale-failure circuit breaker trips after the configured limit instead of alternating cold turns. Zero Data Retention rejections still disable chaining on the first strike.
-- Fixed Anthropic Messages tool schema normalization demoting root `anyOf`/`allOf` and all `oneOf` constraints into descriptions instead of forwarding provider-rejected keywords in MCP tool `input_schema`.
-- Fixed Ollama Cloud GLM-5.2 reasoning efforts to map `xhigh` to native think `"max"` ([#2911](https://github.com/can1357/oh-my-pi/pull/2911) by [@serverinspector](https://github.com/serverinspector))
-- Fixed OpenRouter Responses requests tagging the streamed assistant message with a hardcoded `openai-responses` API instead of the runtime `model.api`, which silently disabled native-history replay (`buildResponsesInput`) and cross-model tool-call item-id stripping on subsequent OpenRouter turns. The message now carries `model.api` (matching the Chat Completions path).
-- Fixed OpenAI-family streaming leaking a pre-retry `errorMessage` onto a successful turn: the OpenRouter Anthropic compiled-grammar strict-tool fallback set `errorMessage` before retrying with strict tools disabled and never cleared it on success, and the Chat Completions success path could carry an `errorMessage` from an internally-retried attempt — both made a successful turn read as errored in agent state and telemetry. The Responses fallback no longer assigns `errorMessage`, and the Completions success path clears it before emitting the terminal `done` event.
-- Fixed Codex stream-error `.code` resolution to use the same nested-first precedence (`error.code` → `error.type` → top-level `code`) as `isRetryableCodexFailureEvent` and the formatted message. Previously the error factory resolved top-level-first, so a failure event carrying both a top-level and a differing nested error code surfaced a `.code` that could disagree with its own `retryable` flag and message text.
-
-## [16.0.5] - 2026-06-17
-
-### Added
-
-- Added `antigravityEndpointMode` stream option with `auto`, `production`, and `sandbox` values to control Antigravity endpoint routing
-- Added `seedApiKeyResolver` for reusing a pre-resolved request key while preserving resolver-driven auth retry and credential rotation
-- Added optional `contextSnapshot` property to `AssistantMessage` with token usage metadata via new `ContextSnapshot` interface (`promptTokens`, `nonMessageTokens`, and optional `lastMessageTimestamp`)
-- Added `LITELLM_BASE_URL` guidance to the LiteLLM login prompt so non-default proxy endpoints are discoverable. ([#2726](https://github.com/can1357/oh-my-pi/issues/2726))
-- Added a Gemini thinking-loop guard that watches streamed `thinking` deltas for degenerate reasoning loops — verbatim tail repetition and near-duplicate paragraph cycling — and terminates the stream with a retryable, empty-content `error` message (worded as a transient stream stall) so the turn is discarded and re-sampled instead of committing a runaway transcript. Gated to Gemini models across every transport (OpenRouter, direct Google, Vertex) and disarmed once visible answer text or a tool call starts; disable with `PI_NO_THINKING_LOOP_GUARD=1`.
-
-### Changed
-
-- Changed the Antigravity (`google-antigravity`) request builder to mirror the captured `antigravity/hub` client: gemini-3.x send `thinkingConfig.thinkingBudget` per tier, a fixed per-model `maxOutputTokens`, a default `functionCallingConfig.mode: "VALIDATED"` tool mode (auto/unset tool choice only), a `role: "user"` system instruction, a structured `requestId` (`agent/<id>/<ts>/<trajectoryId>/<step>`), and `labels` (`model_enum`, `trajectory_id`, `last_step_index`, `last_execution_id`, `used_claude*`) tracked across the conversation via provider session state.
-
-### Fixed
-
-- Fixed Gemini usage-tier mapping so `gemini-3.5-flash` is treated as `Flash` and `gemini-3.1-pro` plus `gemini-pro-agent` are treated as `Pro` in usage accounting
-- Fixed Antigravity stream state handling so a request’s `last_execution_id` is committed only after a successful completion and cleared between retry attempts
-- Fixed `streamSimple()` Gemini streams to run through the thinking-loop guard for custom API and pi-native transports, so degenerate `thinking` loops now abort with the same retryable empty-content error path as other Gemini stream paths
-- Fixed Antigravity model streaming and usage fetch paths to retry on transient `429`/`5xx` errors by failing over to the alternate endpoint before surfacing an error
-- Fixed Antigravity endpoint tracking to prefer a previously successful endpoint in `auto` mode for subsequent requests
-- Fixed Antigravity and Gemini CLI model requests failing with an opaque error when Google requires account verification. Cloud Code Assist `403 VALIDATION_REQUIRED` responses now surface the `validation_url` and the signed-in account email when available, so users see an actionable account-verification message instead of the raw API error body.
-- Fixed MiniMax M3 in-band tool calls by adding a MiniMax dialect that parses `<minimax:tool_call>` wrappers instead of falling back to generic XML. ([#2759](https://github.com/can1357/oh-my-pi/issues/2759))
-- Fixed GitHub Copilot OAuth for Business seats by storing the login-discovered API endpoint and routing model enablement plus chat requests to that endpoint. ([#2876](https://github.com/can1357/oh-my-pi/issues/2876))
-
-## [16.0.4] - 2026-06-17
-
-### Fixed
-
-- Fixed tool argument coercion to parse double-encoded JSON strings, including quoted values like `"300"`, when schema expects a number
-- Fixed object-array coercion to parse JSON object and array strings into proper array arguments instead of wrapping raw strings
-- Fixed handling of malformed JSON container strings for array schema fields so validation now surfaces a top-level `expected array, received string` error rather than nested element errors
-- Fixed ChatGPT/Codex browser login missing connector OAuth scopes and rendering object-shaped token endpoint errors as `[object Object]`. ([#2825](https://github.com/can1357/oh-my-pi/issues/2825))
-- Fixed Zhipu/BigModel GLM-5.2 chat-completions requests so internal `xhigh` effort serializes as provider-native `reasoning_effort: "max"` and tool calls opt into `tool_stream`. ([#2833](https://github.com/can1357/oh-my-pi/issues/2833))
-- Fixed Google Gemini CLI and Antigravity tool calls with `toolChoice: "auto"` serializing an explicit `toolConfig` AUTO mode, which can cause Gemini-3 models to leak raw planning JSON instead of executing tools. ([#2830](https://github.com/can1357/oh-my-pi/issues/2830))
-
-## [16.0.3] - 2026-06-16
-
-### Added
-
-- Exported `renderDelimitedThinking` from the `@oh-my-pi/pi-ai/dialect` barrel so consumers can reuse the dialect's `<thinking>` envelope unwrap-and-rewrap logic (the only `./dialect/rendering` primitive re-exported; the rest stay dialect-internal).
-
-### Fixed
-
-- Fixed OpenAI Responses/Codex tool schema normalization stripping provider-rejected regex lookaround patterns from MCP tool parameter schemas. ([#2784](https://github.com/can1357/oh-my-pi/issues/2784))
-- Fixed OpenAI Responses parallel tool-call routing so late keyed argument deltas for a closed call are dropped instead of being appended to another open call.
-
-## [16.0.2] - 2026-06-16
-
-### Added
-
-- Added `UMANS_WEBSEARCH_PROVIDER=native|exa` support for routing Umans gateway-owned web search requests.
-
-### Fixed
-
-- A single MCP tool whose input schema can't be emitted as a valid strict tool schema for the active provider no longer fails the whole turn with HTTP 400. `convertTools` (openai-responses) now validates each tool's emitted parameter schema for `enum`/`const`-vs-`type` contradictions that pass structural JSON-Schema validation but the provider rejects — e.g. a non-null `enum` on a `type: "null"` node, or an `enum` on an `array` node — and quarantines just the offending tool with a `logger.warn` naming the tool and schema path, keeping every other tool usable. Adds `findStrictToolSchemaViolation` to `@oh-my-pi/pi-ai/utils/schema` ([#2652](https://github.com/can1357/oh-my-pi/issues/2652))
-- Fixed OpenAI Responses-compatible streams from Ollama/local hosts dropping arguments for parallel tool calls whose deltas use `fc_<call_id>` item ids, which left earlier `ast_grep` calls with `{}` and failed validation. ([#2715](https://github.com/can1357/oh-my-pi/issues/2715))
-- Fixed dialect transcript rendering so literal thinking envelopes are unwrapped before adding the dialect's own thinking tags, preventing nested `<thinking>` output in advisor raw dumps ([#2700](https://github.com/can1357/oh-my-pi/issues/2700)).
-- Fixed Anthropic-compatible Umans requests escaping client tool names and forwarding gateway web search headers so Kimi answers normally instead of returning raw gateway search results.
-- Fixed Google Gemini tool calls with `toolChoice: "auto"` serializing an explicit `toolConfig` AUTO mode, which can cause Gemini-3 models to leak raw planning JSON instead of executing tools. ([#2776](https://github.com/can1357/oh-my-pi/issues/2776))
-- Fixed OpenAI-compatible Ollama completions that return empty `finish_reason:length` after filling `num_ctx` so they surface an actionable context-window error instead of an empty length stop. ([#2774](https://github.com/can1357/oh-my-pi/issues/2774))
-- Fixed Codex browser login issuing credentials for the `opencode` OAuth originator while OMP requests identify as `pi`, which could make the first authenticated Codex request return 401 ([#2696](https://github.com/can1357/oh-my-pi/issues/2696)).
-
-## [16.0.1] - 2026-06-15
-
-### Added
-
-- Added Umans AI Coding Plan API-key login support and `UMANS_AI_CODING_PLAN_API_KEY` environment fallback ([#2636](https://github.com/can1357/oh-my-pi/pull/2636) by [@oldschoola](https://github.com/oldschoola)).
-
-### Fixed
-
-- Fixed OpenAI Responses, Azure OpenAI Responses, and Codex Responses providers ignoring async `onPayload` replacement bodies. Provider payload hooks can now transform the actual request body sent upstream, matching the Anthropic/Gemini replacement contract.
-- Fixed OpenAI-compatible chat-completions streams that send object-shaped tool arguments in fragments by deep-merging nested objects and task arrays instead of replacing earlier chunks. ([#2617](https://github.com/can1357/oh-my-pi/issues/2617))
-- Fixed OpenAI Responses strict-mode tool schema normalization for nullable enum MCP parameters so enum constraints are distributed to matching `anyOf` branches instead of being copied onto the `null` branch. ([#1835](https://github.com/can1357/oh-my-pi/issues/1835))
-- Fixed Cursor provider formatting tool errors with the same `[Tool Result]` prefix as successful results, causing Composer models to misinterpret error messages (e.g. "Pattern must not be empty") as directives over long conversations. Errors now use a `[Tool Error]` prefix so the model can distinguish failures from successes in the prompt history. ([#1853](https://github.com/can1357/oh-my-pi/pull/1853))
-- Fixed `validateToolArguments` silently accepting JSON-encoded array strings (e.g. `'["a","b"]'`) against `union(string, array<string>)` schemas — providers that double-serialize tool-call arguments (Z.AI / GLM) caused tools like `search` to receive the literal `["a","b"]` as a single path, producing zero matches (single element) or glob parse errors (multi-element). A new pre-validation pass parses JSON-array-shaped strings when the schema explicitly accepts both shapes. ([#1788](https://github.com/can1357/oh-my-pi/issues/1788))
-- Fixed Anthropic thinking summaries that arrive wrapped in literal `<thinking>` tags so advisor/raw transcript dumps do not render nested thinking tags ([#2695](https://github.com/can1357/oh-my-pi/issues/2695)).
-
-## [16.0.0] - 2026-06-15
-
-### Breaking Changes
-
-- Renamed the public dialect entrypoint from `@oh-my-pi/pi-ai/grammar` to `@oh-my-pi/pi-ai/dialect`.
-- Renamed grammar dialect identifiers from `ToolCallSyntax` to `Dialect`, renamed the `Grammar` interface to `DialectDefinition`, and renamed `Grammar.syntax` to `DialectDefinition.dialect`.
-- Added `DialectDefinition.renderThinking` and `DialectDefinition.renderTranscript` so dialect implementations serialize complete native chat transcripts, not just tool call/result blocks.
-
-### Added
-
-- Added `renderTranscript` method to dialect definitions for serializing complete native chat transcripts
-- Added `renderThinking` method to dialect definitions for rendering thinking/reasoning blocks
-- Added support for 11 dialect implementations: Anthropic, DeepSeek, Gemini, Gemma, GLM, Harmony, Hermes, Kimi, Pi-native, Qwen3, and XML
-- Added `createInbandScanner` factory function to instantiate dialect-specific scanners
-- Added `getDialectDefinition` function to retrieve dialect implementations by name
-- Added `renderToolCatalog` and `renderInbandToolPrompt` functions for tool catalog rendering
-- Added `renderToolInventory` function to generate human-readable per-tool documentation with examples
-- Added `renderToolExamples` function to render tool usage examples in the model's native dialect
-- Added `encodeInbandToolHistory` function to encode tool call history in dialect-specific format
-- Added `wrapInbandToolStream` function to process streaming responses with in-band tool call parsing
-- Added `ThinkingInbandScanner` for parsing thinking/reasoning blocks across dialects
-- Added `OwnedStream` class for managing dialect-aware streaming with tool call events
-- Added in-band thinking channels to every dialect that was missing one: `gemini` (a ` ```thinking ` fence mirroring ` ```tool_code `), `gemma` (its native `<|channel>thought…<channel|>` reasoning channel), `kimi` (`<think>…</think>`), and `pi` (`<thinking>…</thinking>`). Each scanner now parses reasoning into thinking events instead of leaking chain-of-thought into the visible reply, and every dialect's `renderThinking` is a real channel that round-trips back through its scanner (no passthrough renderers).
-
-### Changed
-
-- Moved public dialect entrypoint from `@oh-my-pi/pi-ai/grammar` to `@oh-my-pi/pi-ai/dialect` in package exports
-- Updated internal imports in `stream-markup-healing.ts` to use new dialect module path
-- Changed `renderToolInventory` to demote a tool description's own markdown headers by one level when it contains a top-level `# ` header, so they nest under the wrapping `# Tool: <name>` heading instead of reading as sibling sections. Descriptions that already start at `##` and headers inside fenced code blocks are left untouched.
-
-### Fixed
-
-- Fixed Gemini, Gemma, Kimi, and Pi in-band scanners to respect `parseThinking: false`, leaving private reasoning markers in visible text when parsing is disabled
-- Fixed thinking-channel parsing for streaming Gemini, Gemma, Kimi, and Pi outputs so split or partial `<thinking>` blocks no longer leak into visible replies
-- Fixed in-band thinking finalization and Kimi stream-healing interactions so leaked `<think>` blocks are preserved when structured tool calls are present, not duplicated when explicit reasoning is present, and closed on stream flush.
-
-### Removed
-
-- Removed `src/grammar/factory.ts` (replaced by `src/dialect/factory.ts`)
-- Removed `src/grammar/rendering.ts` (functionality moved to `src/dialect/rendering.ts`)
-- Removed `src/grammar/xml.ts` (replaced by `src/dialect/xml.ts`)
-
-## [15.13.3] - 2026-06-15
-
-### Added
-
-- Added the `gemini` in-band tool-call syntax with Python-style `tool_code` blocks and `default_api` invocations
-- Added the `gemma` token-delimited in-band tool-call syntax using `<|tool_call>` and `<|tool_response>` blocks
-- Added `gemini` and `gemma` to owned stream tool-result token detection so their tool responses are recognized
-- Fixed truncated Gemini and Gemma tool blocks from being emitted as plain text during streaming
-- Added the Azure OpenAI provider definition (`azure`) to the registry; `AZURE_OPENAI_API_KEY` resolves as its env-var API key via the catalog provider table.
-
-### Changed
-
-- Gemini tool-call examples now render without the `default_api.` namespace prefix, keeping `<example>` blocks concise. The live wire format still uses `default_api.` per the Gemini grammar.
-
-### Fixed
-
-- Fixed duplicate tool call projections by deduplicating provider-native `toolCall` events against in-band `tool_code` calls and keeping only the first real channel
-- Dropped nameless native `toolCall` events so they no longer appear as surfaced tool calls in owned-mode streams
-- Fixed truncated Gemini and Gemma tool blocks from being emitted as plain text during streaming
-- Fixed Gemini/Gemma in-band tool-call parsing around Python comments, raw/unicode string literals, and Gemma close-token text inside string values.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@a20cc0d04b64](https://github.com/can1357/oh-my-pi/blob/a20cc0d04b64f4a68fcc559cbd258743d984c50e/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@592e894eb29e](https://github.com/can1357/oh-my-pi/blob/592e894eb29ed3db2ee2dae71ec7d72ac13c64c8/packages/ai/CHANGELOG.md).

@@ -10,15 +10,9 @@
  * OpenRouter never saw `providers.openrouterVariant`, breaking sticky routing
  * and OpenRouter response-cache hits across advisor calls.
  */
-import {
-	fitOutputTokensToContextWindow,
-	type StreamFn,
-	Tokenizer,
-	tokenizerEncodingForModel,
-} from "@oh-my-pi/pi-agent-core";
+import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
-import type { Encoding } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 
@@ -81,8 +75,9 @@ export function createSettingsAwareStreamFn(
 	base: StreamFn = streamSimple,
 	slowModeContext?: SettingsStreamSlowModeContext,
 ): StreamFn {
-	// One tokenizer per encoding, so per-message counts are reused across requests.
-	const tokenizers = new Map<Encoding | null, Tokenizer>();
+	// One tokenizer per reading model, so per-message counts are reused across
+	// requests: its prices (images, replayed thinking) belong to that model.
+	const tokenizers = new Map<string, Tokenizer>();
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
@@ -136,11 +131,11 @@ export function createSettingsAwareStreamFn(
 		const storeResponses =
 			streamOptions?.storeResponses ??
 			(model.provider === "muse-code" ? cfgProvidersMuseCodeStoreResponses.get(settings) : undefined);
-		const encoding = tokenizerEncodingForModel(model);
-		let tokenizer = tokenizers.get(encoding);
+		const readerKey = `${model.provider}\0${model.api}\0${model.id}`;
+		let tokenizer = tokenizers.get(readerKey);
 		if (!tokenizer) {
 			tokenizer = new Tokenizer(model);
-			tokenizers.set(encoding, tokenizer);
+			tokenizers.set(readerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
 		const merged: SimpleStreamOptions = {

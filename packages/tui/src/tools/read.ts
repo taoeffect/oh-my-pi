@@ -15,7 +15,7 @@ import type {
 	ToolRenderer,
 } from "./renderer";
 import { ansi, compact, md } from "../native/describe";
-import { base64ImageNode } from "../native/blobs";
+import { base64ImageNode, nativeMediaNode } from "../native/blobs";
 import type { NativeChild, NativeNode } from "../native/node";
 import { fileHref, footnoteText, inlineErrorView, resultText } from "./native-view";
 import { numberedCode } from "./grouped-file-output";
@@ -54,6 +54,12 @@ export interface ReadToolDetails {
 	truncation?: ReadTruncationStats;
 	isDirectory?: boolean;
 	resolvedPath?: string;
+	/**
+	 * Absolute path of the disk file whose image this read returned. A native TSP host that
+	 * supports `media` shows the file by path instead of the uploaded image bytes. Unset for
+	 * screenshots, URL reads and other images not backed by a file. Display-only.
+	 */
+	mediaPath?: string;
 	suffixResolution?: { from: string; to: string };
 	url?: string;
 	finalUrl?: string;
@@ -600,6 +606,11 @@ export const readToolRenderer = {
 		let cachedWidth: number | undefined;
 		let cachedExpanded: boolean | undefined;
 		let cachedLines: string[] | undefined;
+		const dropCache = () => {
+			cachedWidth = undefined;
+			cachedExpanded = undefined;
+			cachedLines = undefined;
+		};
 		return markFramedBlockComponent({
 			render: (width: number) => {
 				const expanded = options.expanded;
@@ -634,11 +645,8 @@ export const readToolRenderer = {
 				cachedExpanded = expanded;
 				return cachedLines;
 			},
-			invalidate: () => {
-				cachedWidth = undefined;
-				cachedExpanded = undefined;
-				cachedLines = undefined;
-			},
+			invalidate: dropCache,
+			releaseRenderCaches: dropCache,
 		});
 	},
 	describeCall(args: ReadRenderArgs): NativeToolView {
@@ -657,7 +665,7 @@ export const readToolRenderer = {
 	 */
 	describeResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: ReadToolDetails; isError?: boolean },
-		_options: RenderResultOptions,
+		options: RenderResultOptions,
 		args?: ReadRenderArgs,
 	): NativeToolView {
 		const details = result.details;
@@ -693,6 +701,8 @@ export const readToolRenderer = {
 		);
 
 		const contentText = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
+		// A file Tern's media viewer shows (image, model, PDF, video, audio): the host loads it by path.
+		const media = options.media && details?.mediaPath ? nativeMediaNode(details.mediaPath, "media") : undefined;
 		const imageBlock = result.content?.find(isImageBlock);
 		if (imageBlock) {
 			const detailText = contentText.trim();
@@ -701,7 +711,7 @@ export const readToolRenderer = {
 				tone: suffix ? "warning" : undefined,
 				inline: true,
 				body: compact<NativeChild>([
-					describeReadImage(imageBlock, shortenPath(suffix?.to ?? splitReadRenderPath(rawPath).path)),
+					media ?? describeReadImage(imageBlock, shortenPath(suffix?.to ?? splitReadRenderPath(rawPath).path)),
 					detailText.length > 0 && ansi(detailText),
 					foot,
 				]),
@@ -720,7 +730,7 @@ export const readToolRenderer = {
 						details?.displayContent?.lineNumbers,
 						getLanguageFromPath(renderPath.path),
 					);
-		return { tool: head, inline: true, body: compact<NativeChild>([...content, foot]) };
+		return { tool: head, inline: true, body: compact<NativeChild>([media, ...content, foot]) };
 	},
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<ReadRenderArgs, ReadToolDetails>;

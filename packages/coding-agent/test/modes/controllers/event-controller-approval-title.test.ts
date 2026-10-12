@@ -1,15 +1,15 @@
 /**
- * Terminal-title mirror of the wrapper's approval gate
- * (`EventController.#toolWillPromptForApproval`).
+ * Run-status mirror of the wrapper's approval gate
+ * (`EventController.#blockingPrompt`).
  *
  * The wrapper blocks on `uiContext.select` after `tool_execution_start`; the
- * controller mirrors that to set the `attention` title. Session approvals
- * ("… Commands for Session") downgrade `prompt` → allow in the wrapper, so the
- * title must not flip to `attention` for them — while the three prompts a
- * session grant may never answer (pending provider safety checks, carried by
- * the computer tool's synthetic event args, a tool-demanded `override`, and a
- * `task` call, which no session grant may cover) still block per call and must
- * keep the `attention` title.
+ * controller mirrors that to report the run `blocked` on permission. Session
+ * approvals ("… Commands for Session") downgrade `prompt` → allow in the
+ * wrapper, so the run must not report `blocked` for them — while the three
+ * prompts a session grant may never answer (pending provider safety checks,
+ * carried by the computer tool's synthetic event args, a tool-demanded
+ * `override`, and a `task` call, which no session grant may cover) still block
+ * per call and must keep reporting `blocked`.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -22,8 +22,8 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { approveToolForSession, clearSessionApprovals } from "@oh-my-pi/pi-coding-agent/tools/session-approvals";
 import { cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import type { TerminalTitleState } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import type { RunStatus } from "@oh-my-pi/pi-coding-agent/utils/run-status";
+import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 
 const SESSION_ID = "approval-title-test-session";
 
@@ -32,7 +32,7 @@ const execTool = { name: "bash", approval: { tier: "exec" } } as unknown as Agen
 
 /**
  * Tool-demanded prompt, as `bash` returns for critical patterns: the wrapper
- * refuses to let a session grant answer it, so the title must stay `attention`.
+ * refuses to let a session grant answer it, so the run must stay `blocked`.
  */
 const overrideTool = {
 	name: "bash",
@@ -67,14 +67,14 @@ async function startToolCall(ctx: InteractiveModeContext, toolCallId: string, ar
 	} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
 }
 
-type TitleStateSpy = Mock<(state: TerminalTitleState) => void>;
+type RunStatusSpy = Mock<(status: RunStatus) => void>;
 
-function attentionCalls(spy: TitleStateSpy): number {
-	return spy.mock.calls.filter(call => call[0] === "attention").length;
+function permissionBlocks(spy: RunStatusSpy): number {
+	return spy.mock.calls.filter(([status]) => status.state === "blocked" && status.kind === "permission").length;
 }
 
-describe("EventController approval title mirror", () => {
-	let titleSpy: TitleStateSpy;
+describe("EventController approval run-status mirror", () => {
+	let statusSpy: RunStatusSpy;
 	let ctx: InteractiveModeContext;
 
 	beforeAll(async () => {
@@ -84,7 +84,7 @@ describe("EventController approval title mirror", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		titleSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		statusSpy = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		cfgToolsApprovalMode.override(settings, "always-ask");
 		ctx = createFixture();
 	});
@@ -96,47 +96,47 @@ describe("EventController approval title mirror", () => {
 		resetSettingsForTest();
 	});
 
-	it("flips the title to attention for a prompt-policy tool call", async () => {
+	it("reports blocked on permission for a prompt-policy tool call", async () => {
 		await startToolCall(ctx, "tc-1", { command: "ls" });
-		expect(attentionCalls(titleSpy)).toBe(1);
+		expect(permissionBlocks(statusSpy)).toBe(1);
 	});
 
-	it("keeps the working title once the tool is approved for the session", async () => {
+	it("does not report blocked once the tool is approved for the session", async () => {
 		approveToolForSession(SESSION_ID, "bash");
 		await startToolCall(ctx, "tc-2", { command: "ls" });
-		expect(attentionCalls(titleSpy)).toBe(0);
+		expect(permissionBlocks(statusSpy)).toBe(0);
 	});
 
-	it("restores attention after session approvals are cleared", async () => {
+	it("reports blocked again after session approvals are cleared", async () => {
 		approveToolForSession(SESSION_ID, "bash");
 		await startToolCall(ctx, "tc-3", { command: "ls" });
 		clearSessionApprovals(SESSION_ID);
 		await startToolCall(ctx, "tc-4", { command: "ls" });
-		expect(attentionCalls(titleSpy)).toBe(1);
+		expect(permissionBlocks(statusSpy)).toBe(1);
 	});
 
-	it("stays attention for pending provider safety checks despite session approval", async () => {
+	it("stays blocked for pending provider safety checks despite session approval", async () => {
 		approveToolForSession(SESSION_ID, "bash");
 		await startToolCall(ctx, "tc-5", {
 			actions: [{ type: "key", key: "Return" }],
 			pendingSafetyChecks: [{ checkId: "c1", prompt: "Confirm" }],
 		});
-		expect(attentionCalls(titleSpy)).toBe(1);
+		expect(permissionBlocks(statusSpy)).toBe(1);
 	});
 
-	it("stays attention for a tool-demanded override despite session approval", async () => {
+	it("stays blocked for a tool-demanded override despite session approval", async () => {
 		approveToolForSession(SESSION_ID, "bash");
 		ctx = createFixture(overrideTool);
 		await startToolCall(ctx, "tc-6", { command: "rm -rf /" });
-		expect(attentionCalls(titleSpy)).toBe(1);
+		expect(permissionBlocks(statusSpy)).toBe(1);
 	});
 
-	it("stays attention for a task call, which no session grant may cover", async () => {
+	it("stays blocked for a task call, which no session grant may cover", async () => {
 		// The wrapper offers `task` no session option and honors none, so a grant
-		// recorded for the tool cannot silence the title either.
+		// recorded for the tool cannot clear the blocked status either.
 		approveToolForSession(SESSION_ID, "task");
 		ctx = createFixture(taskTool);
 		await startToolCall(ctx, "tc-7", { prompt: "explore the repo" }, "task");
-		expect(attentionCalls(titleSpy)).toBe(1);
+		expect(permissionBlocks(statusSpy)).toBe(1);
 	});
 });

@@ -30,6 +30,7 @@
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
 import { type Component, Container, CURSOR_MARKER } from "../tui";
+import { getNativeBlob } from "./blobs";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
 import { isNativeSettled } from "./settle";
@@ -291,6 +292,7 @@ export class Reconciler {
 		this.#prevPortals = portals;
 		this.#regions = next;
 		for (const entry of this.#dels) this.#deleteEntry(entry);
+		this.#dels = [];
 		// Parked to survive a parent/child swap but absent from the new description.
 		for (const state of this.#parked) {
 			if (!state.parked) continue;
@@ -403,13 +405,31 @@ export class Reconciler {
 		return this.#findEditorIn(node, state.id, "", state.owner, depth);
 	}
 
-	#findEditorIn(node: NativeNode, id: string, keypath: string, owner: Owner, depth: number): string | null {
+	/**
+	 * The first editor under `node`. An `overlay`/`picker` child outside a hoisted
+	 * sheet is hoisted into `layer` under its `^` keypath (see {@link #entries}), so
+	 * a field in a sheet a dock component describes is found under that id.
+	 */
+	#findEditorIn(
+		node: NativeNode,
+		id: string,
+		keypath: string,
+		owner: Owner,
+		depth: number,
+		hoist = true,
+	): string | null {
 		if (node.k === "editor" || node.k === "input") return id;
-		for (const entry of this.#entries(node.c, keypath, owner, true, null)) {
-			const found =
-				entry.comp === undefined
-					? this.#findEditorIn(entry.node, entry.id, entry.keypath, owner, depth)
-					: this.#findEditorOf(entry.comp, depth + 1);
+		for (const entry of this.#entries(node.c, keypath, owner, false, null)) {
+			let found: string | null;
+			if (entry.comp !== undefined) {
+				found = this.#findEditorOf(entry.comp, depth + 1);
+			} else if (hoist && (entry.node.k === "overlay" || entry.node.k === "picker")) {
+				const path = entry.keypath;
+				const portalPath = keypath === "" ? `^${path}` : `${keypath}/^${path.slice(keypath.length + 1)}`;
+				found = this.#findEditorIn(entry.node, nodeId(owner.base, portalPath), portalPath, owner, depth, false);
+			} else {
+				found = this.#findEditorIn(entry.node, entry.id, entry.keypath, owner, depth, hoist);
+			}
 			if (found !== null) return found;
 		}
 		return null;
@@ -711,6 +731,8 @@ export class Reconciler {
 		owner: Owner,
 		entries: readonly Entry[],
 	): Readonly<Record<string, unknown>> | undefined {
+		// Dereferencing pins the blob through this synchronous reconcile/upload job, even after settling drops its node.
+		if (node.k === "image" && node.p?.blob) getNativeBlob(node.p.blob);
 		return normalizeIconProps(node.k, this.#resolveRefs(node, owner, entries));
 	}
 

@@ -31,6 +31,7 @@ import type {
 	ResolvedOpenAISharedCompat,
 	ThinkingConfig,
 } from "../types";
+import { isOfficialCodexApiUrl } from "../wire/codex";
 import {
 	isAnthropicSigningProxyUrl,
 	isAzureAnthropicRoute,
@@ -107,11 +108,12 @@ class IdentityFacts {
 		return this.is("kimi") && this.family("k2.7-code", "k3");
 	}
 
-	/** Adaptive-thinking Claude generation floor (Opus ≥ min; Sonnet/Fable/Mythos ≥ 5). */
+	/** Adaptive-thinking Claude generation floor (Opus ≥ min; Sonnet/Fable/Mythos ≥ 5; Haiku ≥ 5.5). */
 	anthropicAdaptiveGenAtLeast(opusMin: string): boolean {
 		if (!this.is("anthropic")) return false;
 		if (this.family("opus")) return this.revGte(opusMin);
 		if (this.family("sonnet", "fable", "mythos")) return this.revGte("5");
+		if (this.family("haiku")) return this.revGte("5.5");
 		return false;
 	}
 }
@@ -502,6 +504,7 @@ function detectOpenAICompat(
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !d.isXiaomiMimo && (!(d.isZai || d.isZhipu) || supportsZaiReasoningEffort),
+		trustExplicitThinkingOnly: undefined,
 		// API-conditional: this completions-only Copilot exclusion cannot be a
 		// provider rule without changing Copilot Responses rows.
 		supportsReasoningParams: provider !== "github-copilot",
@@ -731,6 +734,7 @@ function resolveOpenAIResponsesPolicy(
 			hostMatchesUrl(baseUrl, "openrouter") ||
 			hostMatchesUrl(baseUrl, "deepseekFamily"),
 		supportsReasoningEffort: !isXaiHost,
+		trustExplicitThinkingOnly: undefined,
 		supportsLongPromptCacheRetention: isOpenAIUrl,
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
@@ -792,7 +796,12 @@ function resolveOpenAIResponsesPolicy(
 			(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl)),
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		storeResponses: false,
-		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
+		connectionBoundNativeHistory: false,
+		// The Codex backend is official at the URL its requests default to when `baseUrl` is unset, and at paths
+		// under it such as `/codex` and `/codex/responses`, which its requests resolve to the same endpoint.
+		officialEndpoint:
+			isOfficialOpenAIEndpoint(provider, baseUrl) ||
+			(api === "openai-codex-responses" && isOfficialCodexApiUrl(baseUrl)),
 		harmonyLeakMitigation: false,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
@@ -854,6 +863,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		storeResponses: compat.storeResponses,
+		connectionBoundNativeHistory: compat.connectionBoundNativeHistory,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,
@@ -887,6 +897,7 @@ function resolveAnthropicPolicy(
 		supportsContextManagement: true,
 		supportsServerCompaction: false,
 		firstPartyProvider: false,
+		honorsClaudeCodeBetaKillSwitch: false,
 		supportsOutputEffort: true,
 		disableStrictTools: rejectsStrictTools,
 		// Present as a key so models.yml `compat` can set it; unset unless detected.
@@ -910,6 +921,11 @@ function resolveAnthropicPolicy(
 		escapeBuiltinToolNames: false,
 		injectClaudeCodeInstruction: true,
 		stripImageInput: false,
+		// Unset means "canonical Anthropic image contract"; the request builder
+		// owns those numbers. The keys must exist for a KDL rule or a
+		// user-authored `compat` block to override them.
+		maxImageDimension: undefined,
+		maxImagePayloadBytes: undefined,
 		thinkingLoopGuard: undefined,
 		// Present as keys so models.yml `compat` can set them; unset unless a rule assigns them.
 		stripThinkingHistory: undefined,
@@ -932,6 +948,9 @@ function resolveBedrockPolicy(spec: ModelSpec<"bedrock-converse-stream">, axes: 
 		promptCacheMinimumTokens: 0,
 		promptCacheMaximumCheckpoints: 0,
 		supportsForcedToolChoice: true,
+		// Opt-out: every prefix-bound Claude line on Converse takes the controls,
+		// including custom Bedrock-wire providers; KDL or models.yml sets `false`.
+		supportsThinkingBindingControls: true,
 	};
 	// Reasoning capability is a mechanism gate; adaptive-lineage duration is rule-owned.
 	compat.streamIdleTimeoutMs = compatReasoning(spec, axes) ? BEDROCK_REASONING_STREAM_IDLE_TIMEOUT_MS : undefined;
@@ -966,6 +985,10 @@ function resolveGooglePolicy(
 		claudeThinkingBetaHeader: false,
 		antigravityClaudeToolMode: false,
 		stripImageInput: false,
+		// Unset means "no image contract": images go out as sent. Keys exist so
+		// a KDL rule or a user `compat` block can declare one.
+		maxImageDimension: undefined,
+		maxImagePayloadBytes: undefined,
 	};
 	applyWireAxes(compat, axes.wire, spec.api);
 	applyCompatOverrides(compat, spec.compat);
@@ -1009,7 +1032,8 @@ function defaultThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>, facts: Ide
 				return "anthropic-budget-effort";
 			}
 			if (facts.is("anthropic")) {
-				if (facts.revGte("4.6") && !facts.family("haiku")) return "anthropic-adaptive";
+				// Haiku stays on budget thinking until 5.5, its first adaptive generation.
+				if (facts.revGte(facts.family("haiku") ? "5.5" : "4.6")) return "anthropic-adaptive";
 				if (facts.family("opus") && facts.revGte("4.5")) return "anthropic-budget-effort";
 			}
 			return "budget";

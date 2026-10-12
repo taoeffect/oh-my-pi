@@ -44,7 +44,7 @@ export type SnapcompactSavingsSink = (
 	model: Model,
 ) => void;
 
-// Per-provider image-count budgets live in @oh-my-pi/snapcompact
+// Per-deployment image-count budgets come from the catalog via @oh-my-pi/snapcompact
 // (`providerImageBudget`): snapcompact frames are 1568px (<2000px) so
 // dimension/size limits never bind; only COUNT does. Once the budget is
 // spent by already-attached archive/system-prompt images, tool results ship
@@ -318,7 +318,7 @@ export function estimateInlineSavings(input: {
 	const shape = snapcompact.resolveShape(model, options.shape);
 	const tokenizer = new Tokenizer(model);
 	const existingImages = countMessageImages(input.messages);
-	const budget = snapcompact.providerImageBudget(model.provider) - existingImages;
+	const budget = snapcompact.providerImageBudget(model) - existingImages;
 
 	const candidates: InlineToolResultCandidate[] = [];
 	if (options.renderToolResults) {
@@ -459,7 +459,7 @@ export class SnapcompactInlineTransformer {
 		const shape = snapcompact.resolveShape(model, options.shape);
 		const shapeKey = JSON.stringify(shape);
 		const tokenizer = new Tokenizer(model);
-		const budget = snapcompact.providerImageBudget(model.provider) - countMessageImages(context.messages);
+		const budget = snapcompact.providerImageBudget(model) - countMessageImages(context.messages);
 		if (budget <= 0) return context;
 
 		const messages = [...context.messages];

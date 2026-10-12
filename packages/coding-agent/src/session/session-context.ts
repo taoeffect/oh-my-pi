@@ -66,7 +66,7 @@ function hasCrashRiskSnapcompactFramePayload(
 ): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET
 	);
 }
 
@@ -99,7 +99,7 @@ function snapcompactHistoryBlockOptions(
 		return { maxFrameDataBytes: 0, ...(resolveFrameData ? { resolveFrameData } : {}) };
 	}
 	return {
-		maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+		maxFrameDataBytes: options?.maxFrameDataBytes ?? snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
 		...(resolveFrameData ? { resolveFrameData } : {}),
 	};
 }
@@ -182,6 +182,9 @@ export interface BuildSessionContextOptions {
 	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
+	 *  (unset: {@link snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET}). */
+	maxFrameDataBytes?: number;
 }
 
 /**

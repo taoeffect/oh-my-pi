@@ -24,6 +24,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import { resolveThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -41,7 +42,7 @@ import {
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
-import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
+import { reasoningReplayKey, Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
 import {
 	createAdditionalContextMessage,
 	joinAdditionalContext,
@@ -453,6 +454,7 @@ export class Agent {
 	#promptCacheKey?: string;
 	#metadata?: Record<string, unknown>;
 	#metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	#modelResolver?: (model: Model) => Model;
 	#providerSessionState?: Map<string, ProviderSessionState>;
 	#thinkingBudgets?: ThinkingBudgets;
 	#temperature?: number;
@@ -539,6 +541,11 @@ export class Agent {
 	 * are queued for the next boundary.
 	 */
 	hasBackgroundCompletions?: AgentLoopConfig["hasBackgroundCompletions"];
+	/**
+	 * Hook that peeks whether a passive aside is queued for the next boundary;
+	 * ends an interruptible wait without interrupting other tools.
+	 */
+	hasQueuedAsides?: AgentLoopConfig["hasQueuedAsides"];
 
 	constructor(opts: AgentOptions = {}) {
 		this.#state = { ...this.#state, ...opts.initialState };
@@ -844,21 +851,26 @@ export class Agent {
 
 	/**
 	 * Tokenizer for the active model. The instance is replaced whenever the
-	 * active model's encoding or snapcompact frame pricing changes (see
-	 * {@link setModel}), so callers must not cache it across model switches.
+	 * active model's encoding, image or thinking-replay pricing, or
+	 * replayed-reasoning reader changes (see {@link setModel}), so callers must
+	 * not cache it across model switches.
 	 */
 	get tokenizer(): Tokenizer {
 		return this.#tokenizer;
 	}
 
 	/**
-	 * Swap the tokenizer only when the encoding or frame pricing actually
-	 * changes, so the warm per-message memo survives same-pricing model switches.
+	 * Swap the tokenizer only when the encoding, image or thinking-replay
+	 * pricing, or replayed-reasoning reader actually changes, so the warm
+	 * per-message memo survives same-pricing model switches.
 	 */
 	#syncTokenizer(model: Model | null | undefined): void {
 		if (
 			tokenizerEncodingForModel(model) !== this.#tokenizer.encoding ||
-			snapcompact.frameBillingKey(snapcompact.frameBilling(model ?? undefined)) !== this.#tokenizer.frameBillingKey
+			snapcompact.frameBillingKey(snapcompact.frameBilling(model ?? undefined)) !==
+				this.#tokenizer.frameBillingKey ||
+			reasoningReplayKey(model) !== this.#tokenizer.reasoningReplayKey ||
+			resolveThinkingReplayTokens(model ?? {}) !== this.#tokenizer.thinkingReplayTokens
 		) {
 			this.#tokenizer = new Tokenizer(model);
 		}
@@ -933,7 +945,8 @@ export class Agent {
 	}
 
 	/** Register a listener notified after any steering/follow-up queue mutator
-	 *  (enqueue, dequeue-on-delivery, clear, restore) runs. Internal-only signal —
+	 *  (enqueue, dequeue-on-delivery, clear, restore, live-steering adoption,
+	 *  withdrawal, and landing in the transcript) runs. Internal-only signal —
 	 *  the queue itself has no concept of display filtering — so listeners
 	 *  recompute their own snapshot from `peekSteeringQueue()`/`peekFollowUpQueue()`
 	 *  (or a higher-level view) on notification. */
@@ -1066,11 +1079,13 @@ export class Agent {
 
 	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
+		let adopted = false;
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
 			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
 			let last: LiveSteeredEntry | undefined;
+			adopted = true;
 			for (const message of pending) {
 				if (!taken.includes(message)) continue;
 				last = { message, controller: delivery.controller };
@@ -1085,6 +1100,10 @@ export class Agent {
 				delivery.next = 0;
 			}
 		}
+		// The adopted messages move into #liveSteered, which queue snapshots
+		// (peekLiveSteeredMessages) count as still pending; listeners must hear
+		// about the swap or their queue view goes stale for the rest of the turn.
+		if (adopted) this.#emitQueueChanged();
 	}
 
 	/**
@@ -1103,6 +1122,9 @@ export class Agent {
 			suppress(message, controller);
 			for (const context of additional ?? []) suppress(context, controller);
 		}
+		// Every snapshot counts live-steered messages as pending, so clearing
+		// them is a queue change even when the caller re-queues them right after.
+		const hadLiveSteered = this.#liveSteered.length > 0;
 		this.#liveSteered = [];
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
@@ -1110,6 +1132,7 @@ export class Agent {
 			for (const message of [...pending, ...delivery.additional]) suppress(message, delivery.controller);
 		}
 		this.#queuedMessageDeliveries.clear();
+		if (hadLiveSteered) this.#emitQueueChanged();
 		return withdrawn;
 	}
 
@@ -1174,7 +1197,8 @@ export class Agent {
 	/**
 	 * Provide a source of non-interrupting "aside" messages (e.g. background-job
 	 * completions, late LSP diagnostics) drained at each step boundary. Never
-	 * aborts in-flight tools. See `AgentLoopConfig.getAsideMessages`.
+	 * aborts foreground tools; an interruptible `wait` may end early through the
+	 * peek hooks. See `AgentLoopConfig.getAsideMessages`.
 	 */
 	setAsideMessageProvider(fn: (() => AsideMessage[] | Promise<AsideMessage[]>) | undefined): void {
 		this.#asideMessageProvider = fn;
@@ -1207,8 +1231,20 @@ export class Agent {
 	}
 
 	setModel(model: Model) {
-		this.#state.model = model;
-		this.#syncTokenizer(model);
+		// Sessions may start with no model selected (`initialState.model: undefined`).
+		const resolved = this.#modelResolver && model ? this.#modelResolver(model) : model;
+		this.#state.model = resolved;
+		this.#syncTokenizer(resolved);
+	}
+
+	/**
+	 * Route every model this agent adopts through `resolver` (e.g. to fit a
+	 * shared catalog row to this agent's own settings), starting with the
+	 * current one; `undefined` adopts models as given from now on.
+	 */
+	setModelResolver(resolver: ((model: Model) => Model) | undefined): void {
+		this.#modelResolver = resolver;
+		if (resolver && this.#state.model) this.setModel(this.#state.model);
 	}
 
 	setThinkingLevel(l: Effort | undefined) {
@@ -1319,6 +1355,9 @@ export class Agent {
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
+			// The message landed in the transcript, so it stops counting as
+			// queued pending input; snapshots shrink and listeners must hear it.
+			this.#emitQueueChanged();
 			return;
 		}
 		for (const delivery of this.#queuedMessageDeliveries) {
@@ -1913,9 +1952,11 @@ export class Agent {
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
+			hasQueuedAsides: this.hasQueuedAsides,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
+			onDetachedToolUpdate: event => this.emitExternalEvent(event),
 			telemetry: this.#telemetry,
 		};
 

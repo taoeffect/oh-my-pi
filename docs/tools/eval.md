@@ -198,6 +198,8 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 - JS: `completion(prompt, { model?, system?, schema? })`; Python: keyword form with `model`, `system`, and `schema`.
 - `model`: `"smol"`, `"default"`, or `"slow"` tier; default is the active/default tier.
+- For the `"slow"` tier, configured role selectors honor explicit concrete effort suffixes including `:max` and `:off`; `:max` is clamped to the target model's supported levels. Bare, `:auto`, and `:inherit` primary selectors retain tier-default behavior, including recomputing the default for root fallback models. With an explicit concrete or `:off` primary effort, bare and `:auto` root fallbacks inherit that effective setting and clamp it for their model. Nested fallbacks inherit their immediate parent candidate's effective setting. An explicit concrete effort or `:off` fallback suffix overrides inheritance. `"smol"` and `"default"` retain their existing provider-option behavior.
+- Effort extraction follows the shared selector grammar: strict suffixes such as `:low` and `:off` take precedence even when model matching retains that suffix in an exact model ID. Literal-ID protection applies to the ambiguous `:max` and `:auto` suffixes, with case-insensitive provider and model ID matching.
 - `schema`: JSON Schema for a synthetic `respond` tool; `.wait()` then returns parsed data.
 - Unresolved tier and invalid arguments fail handle allocation; JS's immediate pending-handle wrapper exposes that rejection when awaited/used. Missing credentials, error/abort stops, empty output, and invalid structured output surface from `.wait()`.
 - Handles are process-local, owned by the calling agent, and evicted 30 minutes after settling (or when the owner session ends).
@@ -252,7 +254,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Output sink default window: 50 KiB (`DEFAULT_MAX_BYTES`); live tail: 100 KiB; truncation helpers cap at 3000 lines.
 - Each model-visible JSON display preview is capped at 8000 UTF-8 bytes. Larger values spill in full to the output artifact and retain bounded preview metadata in `jsonOutputs`; if persistence is unavailable or fails, `jsonOutputs` retains the full value.
 - Transcript preview defaults to 10 lines.
-- Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Subagent/workpool fan-out uses `task.maxConcurrency` (default 32, `0` unbounded); completion/judgment requests have their separate fixed 32-request cap.
+- Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Each `workpool()` caps its own live workers at `task.maxConcurrency` (default 32, `0` unbounded). `agent()` takes no `task.maxConcurrency` slot: every handle is a running background job counted against the session-wide `async.maxJobs` cap (default and maximum 100), which it shares with every other background job in the session, including async `bash`, async `task` spawns, `workpool()` pools and nested subagents' jobs. `agent()` fails with `Background job limit reached` once that cap is full. Completion/judgment requests have their own fixed 32-request cap.
 - Malformed params are schema errors; unavailable/disabled backends and missing session are `ToolError`s.
 - Runtime exceptions become backend output with nonzero exit. Interactive stdin is an error. Output truncation does not fail the call.
 - A dead retained managed kernel may be replaced and the invocation retried once by its executor.

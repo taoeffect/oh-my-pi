@@ -38,6 +38,11 @@ export declare class DesktopSession {
    * behind it.
    */
   get capabilities(): DesktopCapabilities
+  /**
+   * Lock and display-sleep state read on the calling thread, never queued
+   * behind the worker, so it answers at once even while a request is stuck.
+   */
+  get screenState(): DesktopScreenState
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
   listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
@@ -228,6 +233,85 @@ export declare class HighlightStream {
   get supported(): boolean
   /** Highlight the next chunk and advance parser state. */
   push(chunk: string): string
+}
+
+/** One accepted or dialed IPC connection. */
+export declare class IpcConnection {
+  /**
+   * Dial `endpoint`. Rejects with code ENOENT (no endpoint), ECONNREFUSED
+   * (stale socket / no listener), ETIMEDOUT, EACCES (peer owned by another
+   * user, or permission), or the OS errno name.
+   */
+  static connect(endpoint: string, options: IpcConnectOptions): Promise<IpcConnection>
+  /**
+   * Begin delivery on a `lines` connection (throws `TypeError` on a `raw`
+   * one). Call `start`/`startRaw` exactly once. Frames received before
+   * start are buffered, never dropped. `onLine` gets each non-empty line
+   * (one trailing CR stripped, invalid UTF-8 replaced lossily). `onClose`
+   * fires exactly once, after the last frame — including after local
+   * `end()`/`destroy()`: `null` for an orderly close, otherwise
+   * `"<CODE>: <message>"`.
+   */
+  start(onLine: (line: string) => void, onClose: (reason: string | null) => void): void
+  /**
+   * Same as `start()` for a `raw` connection (throws `TypeError` on a
+   * `lines` one): `onChunk` gets each received chunk.
+   */
+  startRaw(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
+  /**
+   * Send one frame. lines: a string without LF (`TypeError` otherwise);
+   * LF is appended. raw: string (UTF-8) or `Uint8Array` written as-is.
+   * Frames sent during one JS task are written together when it ends (a
+   * microtask), in order; `end()` writes them first. Returns false once
+   * unwritten bytes exceed 1 MiB (await `drained()` before sending more).
+   * After close: returns false and drops the frame.
+   */
+  send(frame: string | Uint8Array): boolean
+  /** Resolves when the write queue is empty, or the connection closed. */
+  drained(): Promise<void>
+  /**
+   * Graceful: write everything queued, then shut the write half (Unix) /
+   * close the pipe (Windows); onClose follows when the read side ends.
+   */
+  end(): void
+  /**
+   * Immediate close; queued writes are dropped; onClose(null) follows.
+   * Idempotent.
+   */
+  destroy(): void
+  /** Keep the event loop alive while delivering (default). */
+  ref(): void
+  /** Let the event loop exit while this connection is open. */
+  unref(): void
+  /** Whether the connection is closed (or `destroy()` was called). */
+  get closed(): boolean
+}
+
+/** Listening IPC endpoint. */
+export declare class IpcServer {
+  /**
+   * Bind and listen.
+   *
+   * Unix: creates the parent dir (0700) if missing; under an exclusive flock
+   * on `<path>.bind.lock`, rejects EADDRINUSE when a live server answers,
+   * otherwise replaces the stale socket file; the socket is chmod 0600 before
+   * `listen()`. Windows: first pipe instance (exists → EADDRINUSE), remote
+   * clients rejected, DACL granting only the current user.
+   * `onConnection` receives each accepted, peer-verified connection (not yet
+   * started).
+   */
+  static listen(endpoint: string, options: IpcListenOptions, onConnection: (connection: IpcConnection) => void): Promise<IpcServer>
+  /** The endpoint this server listens on. */
+  get endpoint(): string
+  /**
+   * Stop accepting. Unix: unlink the socket file if it is still the inode
+   * this server bound. Accepted connections are untouched. Idempotent.
+   */
+  close(): Promise<void>
+  /** Keep the event loop alive while listening (default). */
+  ref(): void
+  /** Let the event loop exit while listening. */
+  unref(): void
 }
 
 /** WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio. */
@@ -731,6 +815,13 @@ export declare class VcsRepo {
 export declare function __ompInstallTokioRuntime(): void
 
 /**
+ * Points the addon at the directory holding downloaded wasm grammars
+ * (`<dir>/<file>`). The loader (`native/loader-state.js`) calls this once
+ * with `<natives dir>/grammars`; grammars then load lazily from it.
+ */
+export declare function __ompSetGrammarDir(dir: string): void
+
+/**
  * Release version stamped into this `.node` after linking.
  *
  * `None` for an unstamped build. The JS loader compares it against
@@ -781,6 +872,15 @@ export interface ApplicationQuery {
   query?: string
   runningOnly?: boolean
 }
+
+/**
+ * Applies an `HDiffPatch` single-stream patch to `oldPath`, writing `outPath`.
+ *
+ * Accepts HDIFFSF20 patches, zstd-compressed or uncompressed; `outPath` is
+ * created or truncated. Resolves to the result's size in bytes. Rejects on I/O
+ * failure, a damaged or unsupported patch, or a patch made for other old data.
+ */
+export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -863,6 +963,11 @@ export interface AstFindResult {
   limitReached: boolean
   /** Non-fatal parse or pattern errors collected during the run. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 /**
@@ -1035,6 +1140,11 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 export interface AxNode {
@@ -1217,6 +1327,16 @@ export interface DesktopCapabilities {
   inputPermission: string
   axPermission: string
   displayCount: number
+  /**
+   * The user session is locked (lock screen up). Only macOS detects this;
+   * other backends report `false`.
+   */
+  screenLocked: boolean
+  /**
+   * The display is asleep, so nothing can be captured until it wakes. Only
+   * macOS detects this; other backends report `false`.
+   */
+  displayAsleep: boolean
 }
 
 export interface DesktopCapture {
@@ -1242,6 +1362,12 @@ export interface DesktopCapture {
   displays: Array<DesktopDisplay>
   backend: string
   displayServer?: string
+  /**
+   * The user session was locked when this frame was taken: a display
+   * capture shows the lock screen, and a window capture shows the window's
+   * last frame behind it. Only macOS detects this; others report `false`.
+   */
+  screenLocked: boolean
 }
 
 export interface DesktopControlState {
@@ -1288,6 +1414,15 @@ export interface DesktopObservation {
 export interface DesktopPoint {
   x: number
   y: number
+}
+
+/**
+ * Lock and display-sleep state of the user session, read live per call.
+ * Only macOS detects either; other platforms report both as `false`.
+ */
+export interface DesktopScreenState {
+  screenLocked: boolean
+  displayAsleep: boolean
 }
 
 export interface DesktopSessionOptions {
@@ -1908,6 +2043,11 @@ export interface GrepMatch {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
   /** Per-file match count (count mode only). */
   matchCount?: number
 }
@@ -2132,6 +2272,44 @@ export interface InlineSloppyRegion {
  */
 export declare function invalidateFsScanCache(path?: string | undefined | null): void
 
+/** Options for `IpcConnection.connect`. */
+export interface IpcConnectOptions {
+  /**
+   * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
+   * received.
+   */
+  framing: "lines" | "raw"
+  /** Connect deadline. Default 3000 ms. Expiry rejects with code ETIMEDOUT. */
+  timeoutMs?: number
+  /** Max bytes of one received line (lines framing). Default 64 MiB. */
+  maxFrameBytes?: number
+}
+
+/**
+ * Platform endpoint for `name` scoped to directory `dir`.
+ *
+ * Unix: `<dir>/<stem>.sock`; when that path does not fit `sun_path` (104 bytes
+ * on macOS/BSD, 108 on Linux, including NUL), `/tmp/omp-<euid>/<hash16>.sock`.
+ * Windows: `\\.\pipe\omp-<stem>-<hash16(lowercase(resolve(dir)))>`.
+ * `stem` is `name` with every char outside `[A-Za-z0-9._-]` replaced by "_".
+ * Pure and deterministic: every process computes the same endpoint.
+ */
+export declare function ipcEndpoint(dir: string, name: string): string
+
+/** Options for `IpcServer.listen`. */
+export interface IpcListenOptions {
+  /**
+   * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
+   * received.
+   */
+  framing: "lines" | "raw"
+  /**
+   * Max bytes of one received line (lines framing). Default 64 MiB.
+   * Exceeding closes that connection with reason "EMSGSIZE: …".
+   */
+  maxFrameBytes?: number
+}
+
 /** Kind enum of the backend selected by default for this build target. */
 export declare function isoBackend(): IsoBackendKind
 
@@ -2351,6 +2529,11 @@ export interface Match {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
 }
 
 /**
@@ -3393,9 +3576,8 @@ export interface SummarySegment {
 }
 
 /**
- * Check if a language is supported for highlighting.
- * Returns true if the language has either direct support or a fallback
- * mapping.
+ * Check if a language resolves to a grammar (by name, extension or alias),
+ * i.e. whether `highlightCode` colors it rather than echoing it.
  */
 export declare function supportsLanguage(lang: string): boolean
 
@@ -3678,6 +3860,39 @@ export declare function warmBlockParse(options: BlockParseOptions): Promise<unde
  * highlighted languages on the native worker pool.
  */
 export declare function warmHighlighter(): Promise<undefined>
+
+/**
+ * Wasm grammar backing `lang` (alias) or the language of `path`; `null` for
+ * built-in or unknown languages.
+ */
+export declare function wasmGrammarFor(query: WasmGrammarQuery): WasmGrammarInfo | null
+
+/** A grammar the host downloads on first use. */
+export interface WasmGrammarInfo {
+  /** Canonical language name, e.g. `verilog`, `csharp`. */
+  language: string
+  /** stencil-hq/wasm-grammars release tag hosting the grammar, e.g. `v1`. */
+  release: string
+  /**
+   * File name inside the grammar directory; the release asset is
+   * `<file>.zst`.
+   */
+  file: string
+  /** Lowercase hex SHA-256 of the decompressed `.wasm`. */
+  sha256: string
+  /** Byte size of the decompressed `.wasm`. */
+  size: number
+  /** Whether the grammar is downloaded (or already loaded). */
+  installed: boolean
+}
+
+/** Language to look up: an alias, or a path to infer it from. */
+export interface WasmGrammarQuery {
+  /** Language alias (e.g. `kotlin`, `sv`); wins over `path`. */
+  lang?: string
+  /** File whose extension selects the language. */
+  path?: string
+}
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

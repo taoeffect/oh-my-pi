@@ -835,6 +835,7 @@ describe("model thinking derivation", () => {
 		expect(vertex.thinking?.prefixBinding).toBe(true);
 		expect(bedrock.thinking?.prefixBinding).toBe(true);
 		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(bedrock.compat.supportsThinkingBindingControls).toBe(true);
 		expect(direct.compat.supportsMidConversationToolChanges).toBe(true);
 		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
@@ -852,6 +853,45 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(vertex.compat.supportsThinkingBindingControls).toBe(false);
 		expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+	});
+
+	it("materializes a bare /v1/models Haiku 5.5 row as adaptive and priced, unlike Haiku 4.5", () => {
+		// Anthropic's /v1/models carries no capability metadata for a new id.
+		const discovered = (id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "anthropic-messages",
+				provider: "anthropic",
+				baseUrl: "https://api.anthropic.com/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			});
+		const haiku55 = discovered("claude-haiku-5-5");
+
+		expect(haiku55.reasoning).toBe(true);
+		expect(haiku55.thinking?.mode).toBe("anthropic-adaptive");
+		expect(getSupportedEfforts(haiku55)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+		expect(mapEffortToAnthropicAdaptiveEffort(haiku55, Effort.Max)).toBe("max");
+		expect(haiku55.thinking?.prefixBinding).toBe(true);
+		expect(haiku55.compat.supportsSamplingParams).toBe(false);
+		expect(haiku55.compat.supportsForcedToolChoice).toBe(true);
+		expect(haiku55.compat.supportsBetweenToolsThinking).toBe(false);
+		expect(haiku55.input).toEqual(["text", "image"]);
+		expect(haiku55.contextWindow).toBe(1_000_000);
+		expect(haiku55.maxTokens).toBe(128_000);
+		expect(haiku55.cost).toMatchObject({
+			input: 0.1,
+			output: 0.5,
+			longContext: { inputThreshold: 100_000, input: 0.5, output: 2.5 },
+		});
+
+		const haiku45 = createModel({ id: "claude-haiku-4-5", api: "anthropic-messages", provider: "anthropic" });
+		expect(haiku45.thinking?.mode).toBe("budget");
+		expect(haiku45.compat.supportsSamplingParams).toBe(true);
 	});
 
 	it("keeps per-message effort off every Vertex Claude line that takes it on the Claude API", () => {

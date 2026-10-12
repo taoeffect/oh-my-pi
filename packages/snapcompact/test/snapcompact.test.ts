@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, Usage } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import * as snapcompact from "../src";
 
@@ -9,6 +12,23 @@ const TEST_FRAME_SIZE = 320;
 
 function createUserMessage(content: string): Message {
 	return { role: "user", content, timestamp: 0 };
+}
+
+/** Runs `fn` with `overrides` applied to `Bun.env` (`undefined` deletes), then restores the previous values. */
+function withEnv(overrides: Readonly<Record<string, string | undefined>>, fn: () => void): void {
+	const previous = Object.keys(overrides).map(key => [key, Bun.env[key]] as const);
+	const apply = (entries: Iterable<readonly [string, string | undefined]>) => {
+		for (const [key, value] of entries) {
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+	};
+	try {
+		apply(Object.entries(overrides));
+		fn();
+	} finally {
+		apply(previous);
+	}
 }
 
 const ZERO_USAGE: Usage = {
@@ -325,9 +345,15 @@ describe("shape resolution", () => {
 		// geometry, billed under the standard tier's 1,568-token cap (39²).
 		const opus46 = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" });
 		expect(opus46).toEqual({ ...snapcompact.SHAPES.anthropic, frameTokenEstimate: 1521 });
+		// Older Sonnet lines share that tier but only Sonnet 4.6 was billing-verified.
 		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-3-5-sonnet" })).toEqual({
 			...snapcompact.SHAPES.anthropic,
 			frameTokenEstimate: 1521,
+		});
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-sonnet-4-6" })).toEqual({
+			...snapcompact.SHAPES.anthropic,
+			frameTokenEstimate: 1521,
+			frameTokensVerified: true,
 		});
 
 		// Gemini reads 2048px frames at the same fixed bill, single-column with
@@ -384,6 +410,35 @@ describe("shape resolution", () => {
 		expect(legacyOnAnthropic.frameTokenEstimate).toBe(69 * 69);
 	});
 
+	it("renders frames no wider than the host's image edge, priced at that size", async () => {
+		// Cursor fits Claude and GPT images into 1024×1024 before the model reads them.
+		const claude = snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "claude-opus-5-high" });
+		expect(claude).toMatchObject({ cellWidth: 11, frameSize: 1024, frameTokenEstimate: 37 * 37 });
+		const gpt = snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "gpt-5.4-nano" });
+		expect(gpt).toMatchObject({ cellHeight: 22, frameSize: 1024, frameTokenEstimate: Math.ceil(32 * 32 * 1.2) });
+		expect(
+			snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "claude-opus-5-high" }, "5x8-bw")
+				.frameSize,
+		).toBe(1024);
+		const [frame] = await snapcompact.renderMany("cursor ".repeat(2000), { shape: claude, maxFrames: 1 });
+		expect(decodePng(Buffer.from(frame.data, "base64")).width).toBe(1024);
+		// Targets naming only the host or only Cursor's wire reach the same backend.
+		expect(snapcompact.resolveShape({ provider: "cursor", id: "claude-opus-5-high" }).frameSize).toBe(1024);
+		const [apiOnly] = await snapcompact.renderMany("cursor ".repeat(2000), {
+			model: { api: "cursor-agent", id: "claude-opus-5-high" },
+			maxFrames: 1,
+		});
+		expect(decodePng(Buffer.from(apiOnly.data, "base64")).width).toBe(1024);
+
+		// Readers whose host passes images through keep their own frame size.
+		expect(
+			snapcompact.resolveShape({ provider: "cursor", api: "cursor-agent", id: "gemini-3.7-flash" }).frameSize,
+		).toBe(2048);
+		expect(
+			snapcompact.resolveShape({ provider: "anthropic", api: "anthropic-messages", id: "claude-opus-5" }),
+		).toMatchObject({ frameSize: 1932, frameTokenEstimate: 69 * 69 });
+	});
+
 	it("prices frames by the reading model's lineage, not the wire API", () => {
 		const codex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6-astra" });
 		expect(codex.frameSize).toBe(1568);
@@ -431,6 +486,44 @@ describe("shape resolution", () => {
 		expect(snapcompact.resolveShape({ api: "some-future-api", id: "qwen/qwen3-vl" }).frameTokenEstimate).toBe(
 			snapcompact.FRAME_TOKEN_ESTIMATE,
 		);
+	});
+
+	it("plans archives at a billing-verified frame price and at least the ceiling otherwise", () => {
+		const codex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6.1-sol" });
+		expect(codex.frameTokensVerified).toBe(true);
+		expect(snapcompact.plannedFrameTokens(codex)).toBe(2882);
+		expect(snapcompact.plannedFrameTokens({ ...codex, frameTokensVerified: false })).toBe(
+			snapcompact.FRAME_TOKEN_ESTIMATE,
+		);
+		expect(
+			snapcompact.plannedFrameTokens(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-5-5" })),
+		).toBe(4761);
+		// Same 2,882 price, but Grok 4.5 is priced by the OpenAI-wire fallback and Opus 4.6 by the standard tier.
+		const grok = snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.5" });
+		expect(grok.frameTokenEstimate).toBe(2882);
+		expect(grok.frameTokensVerified).toBeUndefined();
+		expect(snapcompact.plannedFrameTokens(grok)).toBe(snapcompact.FRAME_TOKEN_ESTIMATE);
+		// Grok 4.7's own rule is verified at its frame price.
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.7" }),
+			),
+		).toBe(2442);
+		expect(
+			snapcompact.plannedFrameTokens(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" })),
+		).toBe(snapcompact.FRAME_TOKEN_ESTIMATE);
+		// A forced 2576px shape bills above the ceiling, verified or not.
+		const forced = Math.ceil(81 * 81 * 1.2);
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6.1-sol" }, "5x8-bw"),
+			),
+		).toBe(forced);
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.5" }, "5x8-bw"),
+			),
+		).toBe(forced);
 	});
 
 	it("every catalog variant resolves to a complete, renderable shape", () => {
@@ -1234,22 +1327,72 @@ describe("compact", () => {
 
 describe("frame data budget", () => {
 	const codex = { api: "openai-codex-responses", id: "gpt-6-astra" } as const;
-	const highResFrames = Math.floor(snapcompact.FRAME_DATA_BYTES_BUDGET / snapcompact.FRAME_DATA_BYTES_ESTIMATE);
+	const budget = snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET;
+	const highResFrames = Math.floor(budget / snapcompact.FRAME_DATA_BYTES_ESTIMATE);
 
 	it("gives the default 1568px shapes more of the same byte budget", () => {
 		const opus = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-8" });
 		const sonnet = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-sonnet-4-5" });
-		expect(snapcompact.maxFramesForDataBudget(opus)).toBe(highResFrames);
-		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex))).toBe(26);
-		expect(snapcompact.maxFramesForDataBudget(sonnet)).toBe(26);
+		expect(snapcompact.maxFramesForDataBudget(opus, budget)).toBe(highResFrames);
+		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex), budget)).toBe(26);
+		expect(snapcompact.maxFramesForDataBudget(sonnet, budget)).toBe(26);
 		// Frames larger than 1932px keep the 1932px charge rather than losing frames.
 		const gemini = snapcompact.resolveShape({ api: "google-generative-ai", id: "gemini-3.5-flash" });
-		expect(snapcompact.maxFramesForDataBudget(gemini)).toBe(highResFrames);
+		expect(snapcompact.maxFramesForDataBudget(gemini, budget)).toBe(highResFrames);
 		// Inkier 1568px variants keep the 1932px charge.
 		for (const variant of ["8x13-bw", "6x12-dim", "doc-8on16-sent-dim", "8on16-bw", "silver16-bw"] as const) {
-			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant))).toBe(highResFrames);
+			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant), budget)).toBe(
+				highResFrames,
+			);
 		}
 	});
+
+	it("gives frames half the deployment's inline-image budget, and the default elsewhere", () => {
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		const sol = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const throughProxy = (model: Model) => buildModel({ ...toModelSpec(model), baseUrl: "https://proxy.example/v1" });
+		expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+		expect(snapcompact.frameDataBytesBudget(sol)).toBe(12_000_000);
+		// A rerouted baseUrl has its own body limit; so does a host without a budget rule.
+		expect(snapcompact.frameDataBytesBudget(throughProxy(opus))).toBe(budget);
+		expect(snapcompact.frameDataBytesBudget(throughProxy(sol))).toBe(budget);
+		expect(snapcompact.frameDataBytesBudget(getBundledModel("openrouter", "anthropic/claude-opus-5.5"))).toBe(budget);
+		expect(snapcompact.frameDataBytesBudget(undefined)).toBe(budget);
+		// Opus's 1932px frames: 17 under the default, 70 under Anthropic's share.
+		const opusShape = snapcompact.resolveShape(opus);
+		expect(snapcompact.maxFramesForDataBudget(opusShape, budget)).toBe(17);
+		expect(snapcompact.maxFramesForDataBudget(opusShape, snapcompact.frameDataBytesBudget(opus))).toBe(70);
+	});
+
+	it.each([
+		["ANTHROPIC_BASE_URL", { ANTHROPIC_BASE_URL: "https://anthropic-proxy.example/v1" }],
+		[
+			"Foundry's FOUNDRY_BASE_URL",
+			{ CLAUDE_CODE_USE_FOUNDRY: "1", FOUNDRY_BASE_URL: "https://foundry-proxy.example" },
+		],
+	] as const)(
+		"an official Anthropic model rerouted by %s gets the proxy's 3 MB frame budget and 90 images",
+		(_, reroute) => {
+			const opus = getBundledModel("anthropic", "claude-opus-5-5");
+			const sol = getBundledModel("openai-codex", "gpt-6.1-sol");
+			const official = {
+				ANTHROPIC_BASE_URL: undefined,
+				CLAUDE_CODE_USE_FOUNDRY: undefined,
+				FOUNDRY_BASE_URL: undefined,
+			};
+			withEnv(official, () => {
+				expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+				expect(snapcompact.providerImageBudget(opus)).toBe(600);
+			});
+			withEnv({ ...official, ...reroute }, () => {
+				expect(snapcompact.frameDataBytesBudget(opus)).toBe(budget);
+				expect(snapcompact.providerImageBudget(opus)).toBe(90);
+				// Anthropic's env reroute leaves the Codex backend official.
+				expect(snapcompact.frameDataBytesBudget(sol)).toBe(12_000_000);
+				expect(snapcompact.providerImageBudget(sol)).toBe(2000);
+			});
+		},
+	);
 });
 
 describe("archive helpers", () => {
@@ -1300,21 +1443,19 @@ describe("archive helpers", () => {
 		expect((blocks[2] as { text: string }).text).toContain("tail text");
 	});
 
-	it("provider image budgets stay permissive while unknown providers keep the safe floor", () => {
-		expect(snapcompact.providerImageBudget("openrouter")).toBe(90);
-		expect(snapcompact.providerImageBudget("umans")).toBe(10);
-		// Unknown providers fall to the safe floor.
+	it("caps images at the deployment's budget and unknown hosts at the safe floor", () => {
+		const ramp = buildModel({ ...toModelSpec(getBundledModel("anthropic", "claude-opus-5-5")), provider: "ramp" });
+		expect(snapcompact.providerImageBudget(ramp)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerImageBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
-		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerFrameBudget("umans")).toBe(10);
-		expect(snapcompact.providerFrameBudget("anthropic")).toBe(snapcompact.MAX_FRAMES_DEFAULT);
-		// Anthropic's image cap is the high-water mark the default frame count
-		// must stay under; unknown providers are clamped separately via
-		// providerFrameBudget so their lower image floors cannot archive frames
-		// the send path will drop.
-		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(snapcompact.providerImageBudget("anthropic"));
+		expect(snapcompact.providerFrameBudget(ramp)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		// The frame cap never exceeds the default frame count, even under a 600-image budget.
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		expect(snapcompact.providerImageBudget(opus)).toBe(600);
+		expect(snapcompact.providerFrameBudget(opus)).toBe(snapcompact.MAX_FRAMES_DEFAULT);
+		// The strictest Anthropic budget (200k-window models) still holds a full default archive.
+		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(
+			snapcompact.providerImageBudget(getBundledModel("anthropic", "claude-haiku-4-5")),
+		);
 	});
 });
 

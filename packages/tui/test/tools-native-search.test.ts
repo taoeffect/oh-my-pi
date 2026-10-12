@@ -85,6 +85,23 @@ describe("grep native view", () => {
 		const kinds = (first.c ?? []).filter(isNode).map(n => n.k);
 		expect(kinds).toEqual(["row", "code", "text", "code"]);
 	});
+
+	it("puts a single-file search, which prints no header, under that file's row", () => {
+		const single = [" 9│ctx", "*10│hit", "   │...", "*40│far"].join("\n");
+		const view = grepToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: single }],
+				details: { matchCount: 2, fileCount: 1, files: ["src/a.ts"], displayContent: single },
+			},
+			expanded,
+			{ pattern: "hit" },
+		);
+		const body = (view.body ?? []).filter(isNode);
+		expect(body.map(role)).toEqual(["omp.tool.search.file"]);
+		const kinds = (body[0]!.c ?? []).filter(isNode).map(n => n.k);
+		expect(kinds).toEqual(["row", "code", "text", "code"]);
+		expect(codeStarts(body[0]!.c)).toEqual([9, 40]);
+	});
 });
 
 describe("read native view", () => {

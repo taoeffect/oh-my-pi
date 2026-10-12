@@ -134,8 +134,8 @@ export class SessionAccountPoolScope {
 		const scoped: Partial<ModelRegistry> = {
 			getApiKey,
 			getApiKeyWithCredentialForProvider,
-			getApiKeyForProvider: async (provider, sessionId, options) =>
-				(await getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey,
+			getApiKeyForProvider: (provider, sessionId, options) =>
+				target.getApiKeyForProvider(provider, this.#sessionIdFor(provider, sessionId), options),
 			getApiKeyAndHeaders: async model => {
 				try {
 					const apiKey = await getApiKey(model);

@@ -32,17 +32,19 @@
  *   billing (32px × 1.2, 10k-patch budget at `detail: "original"`) is
  *   area-proportional, so resolution cannot improve chars/$ — 1568 stays.
  *   `detail: "high"` would downgrade (2,500-patch cap); `original` is sent.
- * - **Unknown providers** default to `8on22-bw`. `providerImageBudget` still
- *   caps per-request images per provider so inline imaging cannot flood a
- *   request with attachments, but the old OpenRouter-specific 8-image cap is
- *   gone; routers now use the same permissive budget as direct
- *   Anthropic/Claude lines unless configured otherwise upstream.
+ * - **Unknown providers** default to `8on22-bw`. `providerImageBudget` caps
+ *   per-request images at the deployment's catalog `image-count-budget`, so
+ *   inline imaging cannot flood a request with attachments.
  *
  * The per-frame token estimate follows the reading model's catalog
  * `image-tokenization` rule (its lineage, not the gateway), so Claude behind
  * OpenRouter is billed as Claude and Opus 4.6 under its 1,568-token cap.
  * Models without a lineage rule fall back to the catalog rule for their wire
  * API; a reader with neither costs {@link FRAME_TOKEN_ESTIMATE} per frame.
+ *
+ * A host that downscales every image before the model reads it (catalog
+ * `image-max-edge`, e.g. Cursor) gets frames rendered at that edge instead,
+ * so glyphs reach the model at the size they were drawn.
  *
  * The whole pass is local and deterministic — no LLM call, no API key, no
  * latency beyond rendering. Rasterization and PNG encoding happen in native
@@ -51,14 +53,17 @@
  * re-attached to the compaction summary message on every context rebuild.
  */
 
-import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { reachesOfficialEndpoint } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import {
 	type ImageSize,
 	type ImageTokenization,
 	type ImageTokenizationTarget,
 	imageTokens,
+	resolveImageMaxEdge,
 	resolveImageTokenization,
 } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
+import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
@@ -96,12 +101,14 @@ export interface Shape {
 	frameSize: number;
 	/** Per-frame billed-token estimate for the shape's target provider. */
 	frameTokenEstimate: number;
+	/** `frameTokenEstimate` comes from a catalog rule measured against provider billing. */
+	frameTokensVerified?: boolean;
 	/** Resolution hint attached to frame images (OpenAI-only). */
 	imageDetail?: ImageContent["detail"];
 }
 
 /** Geometry half of a {@link Shape}: everything except provider billing. */
-export type ShapeGeometry = Omit<Shape, "frameTokenEstimate" | "imageDetail">;
+export type ShapeGeometry = Omit<Shape, "frameTokenEstimate" | "frameTokensVerified" | "imageDetail">;
 
 /**
  * Frame variants exercised by the SQuAD evals in `research/` that the native
@@ -273,7 +280,22 @@ export function frameTokens(billing: FrameBilling, size: ImageSize): number {
 function priceShape(base: ShapeGeometry, target: ShapeTarget | undefined): Shape {
 	const billing = frameBilling(target);
 	const frameTokenEstimate = frameTokens(billing, { width: base.frameSize, height: base.frameSize });
-	return { ...base, frameTokenEstimate, ...(billing.imageDetail && { imageDetail: billing.imageDetail }) };
+	return {
+		...base,
+		frameTokenEstimate,
+		...(billing.rule?.verified && { frameTokensVerified: true }),
+		...(billing.imageDetail && { imageDetail: billing.imageDetail }),
+	};
+}
+
+/**
+ * Per-frame tokens archive sizing charges `shape`: its own price when provider
+ * billing verified it, else at least {@link FRAME_TOKEN_ESTIMATE}.
+ */
+export function plannedFrameTokens(shape: Shape): number {
+	return shape.frameTokensVerified
+		? shape.frameTokenEstimate
+		: Math.max(FRAME_TOKEN_ESTIMATE, shape.frameTokenEstimate);
 }
 
 /** Eval-validated shapes, keyed by the provider family they won on. */
@@ -320,6 +342,7 @@ export function isShape(value: unknown): value is Shape {
 		shape.frameSize > 0 &&
 		typeof shape.frameTokenEstimate === "number" &&
 		shape.frameTokenEstimate > 0 &&
+		(shape.frameTokensVerified === undefined || typeof shape.frameTokensVerified === "boolean") &&
 		(detail === undefined || detail === "auto" || detail === "low" || detail === "high" || detail === "original")
 	);
 }
@@ -414,16 +437,23 @@ export interface ShapeTarget {
  * Pick the frame shape for a reader. An explicit `variant` (anything but
  * `"auto"`) forces that geometry; otherwise the model id selects the
  * eval-winning shape — and frame size — for its model line, falling back to
- * the API family's winner when the model is unmeasured. Billing (token
+ * the API family's winner when the model is unmeasured. Either way the frame
+ * is no wider than the host's catalog `image-max-edge`. Billing (token
  * estimate, detail hint) is computed for the resolved frame size from the
  * model's catalog image rule. Accepts a full pi-ai `Model` or any
  * `{ api, id }` subset.
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
-	if (variant && variant !== "auto") return priceShape(SHAPE_VARIANTS[variant], model);
+	if (variant && variant !== "auto") return priceShape(fitHostImageEdge(SHAPE_VARIANTS[variant], model), model);
 	const ideal = model?.id ? idealShapeVariant(model.id) : undefined;
 	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
-	return priceShape(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model);
+	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
+}
+
+/** Shrink `base` to the longest image edge `target`'s host passes to the model. */
+function fitHostImageEdge(base: ShapeGeometry, target: ShapeTarget | undefined): ShapeGeometry {
+	const maxEdge = target ? resolveImageMaxEdge(target) : undefined;
+	return maxEdge !== undefined && base.frameSize > maxEdge ? { ...base, frameSize: maxEdge } : base;
 }
 
 const CJK_HEAVY_MIN_WIDE_CHARS = 8;
@@ -483,11 +513,11 @@ export const MAX_FRAMES_DEFAULT = 80;
  *  text region (newest) — with the denser low-quality tier filling the middle. */
 export const HQ_EDGE_FRAMES = 3;
 
-/** Conservative per-frame token estimate for archive sizing and for frames of
- *  unknown size — the upper bound across shapes: high-res Claude frames hit the
- *  4,784 visual-token cap, billed at +5% margin (ceil(4784 * 1.05)). Keeps the
- *  overflow guard from undercounting a high-res archive at the raised
- *  {@link MAX_FRAMES_DEFAULT}. */
+/** Conservative per-frame token estimate for sizing archives whose frame price
+ *  is not billing-verified, and for frames of unknown size — the upper bound
+ *  across shapes: high-res Claude frames hit the 4,784 visual-token cap, billed
+ *  at +5% margin (ceil(4784 * 1.05)). Keeps the overflow guard from
+ *  undercounting a high-res archive at the raised {@link MAX_FRAMES_DEFAULT}. */
 export const FRAME_TOKEN_ESTIMATE = 5024;
 
 /** Conservative upper bound for one persisted frame's base64 payload. The
@@ -496,22 +526,32 @@ export const FRAME_TOKEN_ESTIMATE = 5024;
  *  standing request bodies at large context windows. */
 export const FRAME_DATA_BYTES_ESTIMATE = 170_000;
 
-/** Maximum snapcompact image base64 carried in every rebuilt provider request.
- *  Above this, provider backends can accept the HTTP body but fail mid-stream
+/** Frame payload cap for a deployment without a catalog `inline-image-byte-budget`:
+ *  an unmeasured backend can accept the HTTP body and still fail mid-stream
  *  with opaque 5xx errors. Keep this independent from visual-token budgeting:
  *  a 1M-token model can afford 70 images on paper, but not the resulting
  *  ~11 MB JSON payload on every turn. */
-export const FRAME_DATA_BYTES_BUDGET = 3_000_000;
+export const DEFAULT_FRAME_DATA_BYTES_BUDGET = 3_000_000;
+
+/** Base64 image bytes the archive frames riding every request to `model` may
+ *  carry: half the deployment's inline-image byte budget, else
+ *  {@link DEFAULT_FRAME_DATA_BYTES_BUDGET}. Frames are the oldest images in the
+ *  request, so the send-time byte clamp evicts them first; the other half stays
+ *  free for live screenshots. */
+export function frameDataBytesBudget(model: Model | undefined): number {
+	const inlineBudget = model ? resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model)) : undefined;
+	return inlineBudget === undefined ? DEFAULT_FRAME_DATA_BYTES_BUDGET : Math.floor(inlineBudget / 2);
+}
 
 /** Default edge variants whose frames shrink with pixel area. Inkier variants
  *  keep the full {@link FRAME_DATA_BYTES_ESTIMATE} at any frame size. */
 const AREA_PRICED_VARIANTS: readonly ShapeGeometry[] = [SHAPE_VARIANTS["8on22-bw"], SHAPE_VARIANTS["11on16-bw"]];
 
-/** Frame-count cap implied by {@link FRAME_DATA_BYTES_BUDGET} for frames
- *  rendered by `shape`. {@link AREA_PRICED_VARIANTS} below 1932px are charged
+/** Frame-count cap a `budget` of base64 bytes implies for frames rendered by
+ *  `shape`. {@link AREA_PRICED_VARIANTS} below 1932px are charged
  *  {@link FRAME_DATA_BYTES_ESTIMATE} scaled by pixel area; every other shape
  *  pays the full estimate. */
-export function maxFramesForDataBudget(shape: ShapeGeometry): number {
+export function maxFramesForDataBudget(shape: ShapeGeometry, budget: number): number {
 	const areaPriced = AREA_PRICED_VARIANTS.some(
 		variant =>
 			variant.font === shape.font &&
@@ -525,7 +565,7 @@ export function maxFramesForDataBudget(shape: ShapeGeometry): number {
 	);
 	const areaRatio = areaPriced ? (shape.frameSize / HIGH_RES_ANTHROPIC_VARIANT.frameSize) ** 2 : 1;
 	const frameBytes = Math.min(FRAME_DATA_BYTES_ESTIMATE, Math.ceil(FRAME_DATA_BYTES_ESTIMATE * areaRatio));
-	return Math.max(1, Math.floor(FRAME_DATA_BYTES_BUDGET / frameBytes));
+	return Math.max(1, Math.floor(budget / frameBytes));
 }
 
 /** Base64 byte length for persisted snapcompact frames. */
@@ -533,36 +573,22 @@ export function frameDataBytes(frames: readonly Pick<Frame, "data">[]): number {
 	return frames.reduce((sum, frame) => sum + frame.data.length, 0);
 }
 
-/**
- * Per-request image-count budgets by provider id. These cap how many images an
- * entire request may carry (archive/system-prompt/tool-result imaging combined).
- * The values are conservative policy caps under the vendor hard limits
- * (Anthropic 100, OpenAI 500, Gemini ~2500); unknown providers fall to a safe
- * floor rather than sending unbounded attachments.
- */
-export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
-	anthropic: 90,
-	"amazon-bedrock": 90,
-	openai: 200,
-	"openai-codex": 200,
-	google: 200,
-	"google-vertex": 200,
-	"google-gemini-cli": 200,
-	openrouter: 90,
-	umans: 10,
-};
-
-/** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
+/** Safe floor for a deployment whose catalog rules set no `image-count-budget`
+ *  (strictest mainstream measured: Groq ~5). */
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
-/** Per-request image budget for `provider`; unknown providers get the floor. */
-export function providerImageBudget(provider: string | undefined): number {
-	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+/** Most images one request to `model`'s deployment may carry, archive,
+ *  system-prompt and tool-result imaging combined. */
+export function providerImageBudget(model: Model | undefined): number {
+	return (
+		(model ? resolveImageCountBudget(model, reachesOfficialEndpoint(model)) : undefined) ??
+		DEFAULT_PROVIDER_IMAGE_BUDGET
+	);
 }
 
-/** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+/** Archive frame cap for `model`: its image budget, never above {@link MAX_FRAMES_DEFAULT}. */
+export function providerFrameBudget(model: Model | undefined): number {
+	return Math.min(providerImageBudget(model), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */
@@ -1969,6 +1995,53 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 		}
 	}
 	return blocks;
+}
+
+/**
+ * Re-applies a smaller frame byte budget to blocks {@link historyBlocks} already built: keeps the newest frames that
+ * fit, priced as {@link historyBlocks} prices them, and replaces each run of dropped frames with one omission notice.
+ * Returns `blocks` itself when every frame fits.
+ */
+export function capFrameDataBytes(
+	blocks: (TextContent | ImageContent)[],
+	maxFrameDataBytes: number,
+): (TextContent | ImageContent)[] {
+	const kept = new Set<number>();
+	let usedBytes = 0;
+	let dropped = false;
+	for (let index = blocks.length - 1; index >= 0; index--) {
+		const block = blocks[index];
+		if (block.type !== "image") continue;
+		if (usedBytes + block.data.length > maxFrameDataBytes) {
+			dropped = true;
+			continue;
+		}
+		usedBytes += block.data.length;
+		kept.add(index);
+	}
+	if (!dropped) return blocks;
+
+	const capped: (TextContent | ImageContent)[] = [];
+	let omittedFrames = 0;
+	let omittedBytes = 0;
+	const flushOmitted = (): void => {
+		if (omittedFrames === 0) return;
+		capped.push({ type: "text", text: omittedFrameNotice(omittedFrames, omittedBytes) });
+		omittedFrames = 0;
+		omittedBytes = 0;
+	};
+	for (let index = 0; index < blocks.length; index++) {
+		const block = blocks[index];
+		if (block.type === "image" && !kept.has(index)) {
+			omittedFrames++;
+			omittedBytes += block.data.length;
+			continue;
+		}
+		flushOmitted();
+		capped.push(block);
+	}
+	flushOmitted();
+	return capped;
 }
 
 // ============================================================================

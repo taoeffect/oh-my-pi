@@ -4,6 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
@@ -123,8 +124,11 @@ export function createPersistedSubagentReviverFactory(
 				);
 			}
 			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
-			// advisor-role model, anything else = the explicit pattern stamped onto
-			// this session's `modelRoles.advisor`. Absent = unadvised (the
+			// advisor-role model, anything else = the pattern stamped onto this
+			// session's `modelRoles.advisor`. Spawn persists it already expanded
+			// against the spawning owner's roles (a parent subagent may override
+			// them); expanding again is a no-op for those and only resolves aliases
+			// in files written before that. Absent = unadvised (the
 			// createSubagentSettings default).
 			const subagentSettings = createSubagentSettings(ctx.settings, {
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
@@ -132,7 +136,12 @@ export function createPersistedSubagentReviverFactory(
 					? {
 							"advisor.enabled": true,
 							...(init.advisor !== "on"
-								? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
+								? {
+										modelRoles: {
+											...ctx.settings.getModelRoles(),
+											advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
+										},
+									}
 								: undefined),
 						}
 					: undefined),
@@ -165,6 +174,8 @@ export function createPersistedSubagentReviverFactory(
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
+			// The spawn's result contract: a session persisted without `yield` returned its final message.
+			const structured = revivedToolNames.includes("yield");
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
@@ -203,6 +214,7 @@ export function createPersistedSubagentReviverFactory(
 							? init.agent
 							: ref.displayName,
 					parentTaskPrefix: ref.id,
+					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
 					expectedAgentRef: expectedRef,
@@ -211,7 +223,7 @@ export function createPersistedSubagentReviverFactory(
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: restrictToolNames || undefined,
-					requireYieldTool: true,
+					requireYieldTool: structured,
 					systemPrompt: () => [...init.systemPrompt],
 					// Inherit current owner policy, never extension authority from a transcript.
 					extensionRoots: () => ctx.session.effectiveExtensionRoots,
@@ -275,6 +287,7 @@ export function createPersistedSubagentReviverFactory(
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,
+				structured,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				// Anchor artifacts to the revived ref's own dir (its parent's children

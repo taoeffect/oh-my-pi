@@ -33,6 +33,19 @@ const stubCodexModel = { api: "openai-codex-responses" } as unknown as Model;
 const stubResponsesModel = { api: "openai-responses" } as unknown as Model;
 const stubContext = { messages: [], tools: [], systemPrompt: [] } as unknown as Context;
 
+/** Base64 PNG whose IHDR declares `width`x`height`; the pixel data is irrelevant to sizing. */
+function pngWithSize(width: number, height: number): string {
+	const bytes = Buffer.alloc(64);
+	Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+	bytes.writeUInt32BE(13, 8);
+	bytes.write("IHDR", 12, "ascii");
+	bytes.writeUInt32BE(width, 16);
+	bytes.writeUInt32BE(height, 20);
+	bytes[24] = 8;
+	bytes[25] = 6;
+	return bytes.toString("base64");
+}
+
 describe("createSettingsAwareStreamFn", () => {
 	it("applies provider settings to the forwarded options when caller omits them", () => {
 		const settings = Settings.isolated({
@@ -200,6 +213,25 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(promptTokens + (fitted ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual(1_000_000);
 		// A prompt that leaves room keeps the transport's own default.
 		expect(calls[1]?.options?.maxTokens).toBeUndefined();
+	});
+
+	it("fits the output cap at the called model's prices, not an earlier model's", () => {
+		// Gemini bills any image a flat 1,120 tokens; GPT-6.1 bills this one 4,763.
+		const gemini = getBundledModel("google", "gemini-3-pro-preview") as Model;
+		const codex: Model = { ...getBundledModel("openai-codex", "gpt-6.1-sol"), contextWindow: 10_000 };
+		const image = { type: "image", data: pngWithSize(2000, 2000), mimeType: "image/png", detail: "original" };
+		const context = { messages: [{ role: "user", content: [image], timestamp: 0 }] } as unknown as Context;
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated({}), base);
+		const fresh = captureBase();
+
+		wrapped(gemini, stubContext, { maxTokens: 8_000 });
+		wrapped(codex, context, { maxTokens: 8_000 });
+		createSettingsAwareStreamFn(Settings.isolated({}), fresh.fn)(codex, context, { maxTokens: 8_000 });
+
+		const fitted = calls[1]?.options?.maxTokens ?? Number.POSITIVE_INFINITY;
+		expect(fitted).toBe(fresh.calls[0]?.options?.maxTokens ?? Number.NaN);
+		expect(4_763 + fitted).toBeLessThanOrEqual(10_000);
 	});
 
 	describe("providers.anthropic.serverSideFallback (opt-in)", () => {

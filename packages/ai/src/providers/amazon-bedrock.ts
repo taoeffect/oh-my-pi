@@ -450,19 +450,24 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			let toolConfig = toolPlan.toolConfig;
 			const sentinelInjected = toolPlan.sentinelInjected;
 			let additionalModelRequestFields = buildAdditionalModelRequestFields(model, options);
-			const prefixMismatchBehavior = model.thinking?.prefixBinding
-				? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
-				: undefined;
+			const thinkingDisabled =
+				isRecord(additionalModelRequestFields?.thinking) &&
+				additionalModelRequestFields.thinking.type === "disabled";
+			const prefixMismatchBehavior =
+				!thinkingDisabled && model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
+					? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
+					: undefined;
 
 			// Some models (Opus/Sonnet 5.5) reject forced tool use outright; keep the
 			// tools offered under `auto` and leave thinking intact.
 			const forcedChoice = toolConfig?.toolChoice?.any || toolConfig?.toolChoice?.tool;
 			if (toolConfig && forcedChoice && !model.compat.supportsForcedToolChoice) {
 				toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
-			} else if (toolConfig && forcedChoice && additionalModelRequestFields) {
-				// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
-				// thinking cannot be disabled, so downgrade its forced choice instead.
-				if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+			} else if (toolConfig && forcedChoice && !thinkingDisabled) {
+				// Bedrock rejects thinking + forced tool_choice. Prefix-bound lines (Fable)
+				// think adaptively even when no thinking field is sent, so downgrade their
+				// forced choice regardless of the binding controls; elsewhere drop thinking.
+				if (model.thinking?.prefixBinding) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
 				else additionalModelRequestFields = undefined;
 			}
 			if (prefixMismatchBehavior) {
@@ -1335,7 +1340,13 @@ function buildAdditionalModelRequestFields(
 	options: BedrockOptions,
 ): Record<string, unknown> | undefined {
 	const reasoning = options.reasoning;
-	if (!reasoning || !model.reasoning) return undefined;
+	if (!model.reasoning) return undefined;
+	if (!reasoning) {
+		if (model.compat.disabledThinking === "disabled") {
+			return { thinking: { type: "disabled" }, output_config: { effort: "low" } };
+		}
+		return undefined;
+	}
 
 	const mode = model.thinking?.mode;
 	if (mode === "anthropic-adaptive") {
