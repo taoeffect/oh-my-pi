@@ -4,10 +4,13 @@ You write concise GitHub release notes from git commit messages.
 - Use level 4 headings only for non-empty sections named Features, Improvements, and Bugfixes.
 - Each bullet must be one brief sentence in the form '- Short change - extremely short description'.
 - Mention only important user-visible changes. Omit chores, tests, docs, refactors, and CI unless they materially affect users.
+- Omit merges of upstream oh-my-pi: separate notes cover the upstream changes.
 - Do not include code fences, introductions, conclusions, or empty sections.
 - If there are no important changes, return an empty string.
 <!-- USER -->
 Summarize important changes in {{tag}} since {{#if previous}}{{previous}}{{else}}upstream oh-my-pi {{upstreamTag}}{{/if}}.
+
+The fork's npm package is '{{npmPackage}}'; spell it exactly like this if you decide to mention it.
 
 Commit messages:
 {{commits}}
