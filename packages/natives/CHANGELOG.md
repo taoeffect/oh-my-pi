@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.10.4] - 2026-10-13
+
+### Fixed
+
+- Fixed `pwsh` code blocks rendering without PowerShell syntax colors ([#15008](https://github.com/can1357/oh-my-pi/issues/15008)).
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

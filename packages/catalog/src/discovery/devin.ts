@@ -106,8 +106,8 @@ function devinCostDenominatorTokens(denominator: string): number {
 /**
  * Per-million-token rates from the config's cost dimensions. `COST_FUZZY` marks
  * an estimated rate, not a different unit, so both kinds are read. `cacheWrite`
- * has no Cascade dimension — Devin bills cache writes at the input rate — and
- * stays 0.
+ * has no Cascade dimension and stays 0; the provider's `cache-write-rate` rules
+ * supply Devin's published rate.
  *
  * Composite configs (`fusion`) flatten their own rate card plus every
  * dispatched component's card into one `modelDimensions` list. A `Sidekick`
@@ -478,7 +478,9 @@ function devinFusionLeadUid(uid: string, liveUids: ReadonlyMap<string, unknown>)
 /**
  * Point a Fusion pairing at its lead. omp runs only the lead (the sidekick is
  * paired by the native client), so the limits and pricing a caller budgets
- * against are the lead's, not the composite card's.
+ * against are the lead's, not the composite card's. The composite uid names no
+ * model, so `buildModel` resolves the row under its `requestModelId` and the
+ * lead's catalog rules (cache-write rate, long-context tier) apply there.
  */
 function routeDevinFusionLead(spec: ModelSpec<"devin-agent">, lead: ModelSpec<"devin-agent">): void {
 	spec.requestModelId = lead.id;

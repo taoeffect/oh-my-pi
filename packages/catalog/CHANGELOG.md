@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [18.10.4] - 2026-10-13
+
+### Added
+
+- Added Muse Code's subscription-only Muse Wonder Full and Wonder contributor tiers with the `max` effort, recording API-equivalent cost instead of $0: Wonder Full at Muse Wonder's $4 input / $0.20 cached / $20 output per 1M tokens, contributor tiers at the measured $1.60 / $0.08 / $8 ([#15522](https://github.com/can1357/oh-my-pi/pull/15522) by [@eggpeat](https://github.com/eggpeat))
+- Added the `classifier-cot-extraction` rule axis, set for Claude, marking models whose classifier refuses earlier reasoning quoted back into their input ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Gemini 4 Argon pricing on Cursor ($2 input / $0.10 cached / $10 output per 1M tokens) and Google Antigravity, which now uses Google's first-party rate instead of showing $0 ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
+- Added scheduled list-price changes to `cost-patch`, as `cost-fallback` already allowed: a dated `effective-rates` card sets the price from its date, and each request is priced at the card in force when it was made, even on models loaded before the change, on rebuilt models, and on Cursor lanes priced from a sibling's card. A malformed dated card now fails the model build instead of silently keeping the old price. `getEffectiveTokenCost` returns that card for price displays, and `hasRecurringTariff` tells these dated-only schedules apart from peak/off-peak tariffs, which alone show a status-line arrow ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
+
+### Changed
+
+- Devin models with a long-context price tier (GPT-5.4 through 5.6 standard lanes, GPT-6 through 6.1, Gemini Pro, and Grok 4.5 through 4.7) now default to a 272K or 200K context window, where that pricing starts; run `/extended-context on` to use the full window at long-context rates ([#14891](https://github.com/can1357/oh-my-pi/pull/14891) by [@eggpeat](https://github.com/eggpeat)).
+- Devin SWE-2, SWE-1.7, and GLM-5.2 fallback pricing no longer charges cache writes at the input rate, since Devin publishes no cache-write rate for them ([#14891](https://github.com/can1357/oh-my-pi/pull/14891) by [@eggpeat](https://github.com/eggpeat)).
+- Google Antigravity now lists Gemini 4 Argon once, with selectable low, medium, and high thinking levels, instead of a separate entry per thinking tier ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
+- Gemini 4 Argon on Google, Vertex, Google Antigravity, and Cursor moves to Google's $4 input / $0.20 cached / $20 output list price on 2026-12-01 (midnight US Pacific), including requests on models loaded before then, without a catalog update ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
+- Devin SWE-2's promotional fallback price now ends on 2027-01-01 for requests on models loaded before then too ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
+
+### Fixed
+
+- Fixed Devin Claude and GPT-5.6 through GPT-6 models pricing prompt-cache writes at $0; they now use Devin's published rate of 1.25x input, and Adaptive uses its input rate ([#14891](https://github.com/can1357/oh-my-pi/pull/14891) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed Devin GPT-5.4 through GPT-6.1, Gemini Pro, and Grok 4.5 through 4.7 models missing the long-context price tiers Devin publishes above 272K and 200K prompt tokens ([#14891](https://github.com/can1357/oh-my-pi/pull/14891) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed Devin Fusion pairings ignoring their lead model's rules, including its cache-write rate and long-context tier ([#14891](https://github.com/can1357/oh-my-pi/pull/14891) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed Kilo and NanoGPT models showing stale or missing prices (for example Gemini 4 Argon at $4/$20 instead of $2/$10, and many models at $0); prices now come from each gateway's live model list ([#15623](https://github.com/can1357/oh-my-pi/pull/15623) by [@eggpeat](https://github.com/eggpeat))
+- Fixed NanoGPT models showing their raw id as the name and no context window (disabling auto-compaction) when the bundled catalog lacked them; names, context windows and output limits now come from NanoGPT's live model list ([#15623](https://github.com/can1357/oh-my-pi/pull/15623) by [@eggpeat](https://github.com/eggpeat))
+
+### Removed
+
+- Removed the Codex `toolMode` model field (`code_mode_only`); Codex discovery no longer maps `tool_mode`
+
 ## [18.10.3] - 2026-10-12
 
 ### Breaking Changes

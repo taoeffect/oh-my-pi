@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	detectStyledUnderlineSupport,
@@ -20,6 +18,7 @@ import {
 	isInsideTerminalMultiplexer,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { withFakeTmux } from "./helpers/fake-tmux";
 
 describe("hasTerminalMultiplexerSession", () => {
 	it("recognizes Herdr session identity while ignoring client-only settings", () => {
@@ -162,29 +161,8 @@ describe("detectTerminalId", () => {
 
 describe("tmux client terminal resolution", () => {
 	it.skipIf(process.platform === "win32")("uses the attached client's terminal profile", async () => {
-		const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tmux-client-"));
-		try {
-			const tmux = path.join(binDir, "tmux");
-			await Bun.write(
-				tmux,
-				`#!/bin/sh
-[ "$1" = "display-message" ] && [ "$2" = "-p" ] && [ "$3" = '#{client_termtype}' ] || exit 64
-printf "%s\\n" "WezTerm 20260905-175422-0f4b5596"
-`,
-			);
-			await fs.chmod(tmux, 0o755);
-			const env = subprocessEnv({
-				PI_TEST_RUNTIME: undefined,
-				BUN_ENV: undefined,
-				NODE_ENV: undefined,
-				TERM: "tmux-256color",
-				TERM_PROGRAM: "tmux",
-				TERM_PROGRAM_VERSION: "3.6b",
-				COLORTERM: "truecolor",
-				TMUX: "/tmp/tmux-1000/default,4242,0",
-				SSH_CONNECTION: "client 1 server 22",
-				PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
-			});
+		const replies = { "display-message -p #{client_termtype}": "WezTerm 20260905-175422-0f4b5596" };
+		const stdout = await withFakeTmux(replies, async binDir => {
 			const proc = Bun.spawn({
 				cmd: [
 					process.execPath,
@@ -192,7 +170,18 @@ printf "%s\\n" "WezTerm 20260905-175422-0f4b5596"
 					`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
 console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyProtocol }));`,
 				],
-				env,
+				env: subprocessEnv({
+					PI_TEST_RUNTIME: undefined,
+					BUN_ENV: undefined,
+					NODE_ENV: undefined,
+					TERM: "tmux-256color",
+					TERM_PROGRAM: "tmux",
+					TERM_PROGRAM_VERSION: "3.6b",
+					COLORTERM: "truecolor",
+					TMUX: "/tmp/tmux-1000/default,4242,0",
+					SSH_CONNECTION: "client 1 server 22",
+					PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
+				}),
 				stdout: "pipe",
 				stderr: "pipe",
 			});
@@ -204,10 +193,10 @@ console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyPro
 
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
-			expect(stdout).toBe('{"id":"wezterm","notifyProtocol":"\\u001b]9;"}\n');
-		} finally {
-			await fs.rm(binDir, { force: true, recursive: true });
-		}
+			return stdout;
+		});
+
+		expect(stdout).toBe('{"id":"wezterm","notifyProtocol":"\\u001b]9;"}\n');
 	});
 });
 

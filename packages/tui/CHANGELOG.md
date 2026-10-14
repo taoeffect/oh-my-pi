@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [18.10.4] - 2026-10-13
+
+### Added
+
+- Plan review overlay can take a remote answer: it shows the remotely chosen execution tier and locks further input like a terminal approval ([#15552](https://github.com/can1357/oh-my-pi/pull/15552) by [@Shadorain](https://github.com/Shadorain))
+
+### Fixed
+
+- The model browser shows the price a model is billed at now, not the one current when its row was loaded: DeepSeek V4 Pro shows its $0.30 / $1.20 card in effect since 2026-09-14 instead of $1.32 / $3.96, and Gemini 4 Argon switches to $4 / $20 on 2026-12-01 ([#15620](https://github.com/can1357/oh-my-pi/pull/15620) by [@eggpeat](https://github.com/eggpeat))
+- Clicking Copy answer in the `/btw` history (and Copy raw in the raw SSE viewer) on native terminals copies the answer instead of the button's label ([#15547](https://github.com/can1357/oh-my-pi/pull/15547) by [@H4vC](https://github.com/H4vC))
+- Fixed image previews inside tmux showing as `SIXEL IMAGE (WxH)` placeholder text when the outer terminal lacks SIXEL; SIXEL is now enabled from tmux's DA1 reply only when tmux's terminal description for the attached client has `Sxl` ([#15513](https://github.com/can1357/oh-my-pi/issues/15513))
+
+### Removed
+
+- Removed `tools/eval-format/code-mode-declarations` (`generateCodeModeDeclarations`), which only served Codex Code Mode.
+
 ## [18.10.3] - 2026-10-12
 
 ### Changed
@@ -2740,46 +2756,4 @@
 - Migrated key parsing and matching logic to native implementation for improved performance
 - Simplified `isKeyRelease()` and `isKeyRepeat()` to use regex pattern matching instead of string inclusion checks
 
-## [9.6.2] - 2026-02-01
-
-### Changed
-
-- Renamed `EllipsisKind` enum to `Ellipsis` for clearer API naming
-- Changed hardcoded ellipsis character from theme-configurable to literal "…" in editor truncation
-- Refactored `visibleWidth` function to use caching wrapper around new `visibleWidthRaw` implementation for improved performance
-
-### Removed
-
-- Removed `truncateToWidth`, `sliceWithWidth`, and `extractSegments` functions from public API (now re-exported directly from @oh-my-pi/pi-natives)
-- Removed `ellipsis` property from `SymbolTheme` interface
-- Removed `extractAnsiCode` function from public API
-
-## [9.6.1] - 2026-02-01
-
-### Changed
-
-- Improved performance of key ID parsing with optimized cache lookup strategy
-- Simplified `visibleWidth` calculation to use consistent Bun.stringWidth approach for all string lengths
-
-### Removed
-
-- Removed `visibleWidth` benchmark file in favor of Kitty sequence benchmarking
-
-## [9.5.0] - 2026-02-01
-
-### Changed
-
-- Improved fuzzy file search performance by using native implementation instead of spawning external process
-- Replaced external `fd` binary with native fuzzy path search for `@`-prefixed autocomplete
-
-## [9.4.0] - 2026-01-31
-
-### Added
-
-- Exported `padding` utility function for creating space-padded strings efficiently
-
-### Changed
-
-- Optimized padding operations across all components to use pre-allocated space buffer for better performance
-
-Older entries are archived in [packages/tui/CHANGELOG.md@e19bb3cb2344](https://github.com/can1357/oh-my-pi/blob/e19bb3cb2344a8953dc04aa398b810230f0e24c3/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@e6b8074bbe4b](https://github.com/can1357/oh-my-pi/blob/e6b8074bbe4b0d459aa812948822c2a634c8e62d/packages/tui/CHANGELOG.md).

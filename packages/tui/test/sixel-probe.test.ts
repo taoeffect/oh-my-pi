@@ -6,6 +6,7 @@ import {
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
+import { withFakeTmux } from "./helpers/fake-tmux";
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
@@ -250,6 +251,49 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 		expect(received).toEqual(["x"]);
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
 	});
+
+	// tmux 3.6a built with SIXEL answers pane DA1 with attribute 4 whatever
+	// client is attached, and refuses the XTSMGRAPHICS geometry query. Only the
+	// client terminal's effective `Sxl` (terminfo, overrides, or the `sixel`
+	// feature) says whether tmux draws SIXEL or its text placeholder.
+	for (const [name, socket, capability, expected] of [
+		["ignores tmux's DA1 SIXEL attribute when the client lacks Sxl", "4242", " 216: Sxl: [missing]", null],
+		[
+			"trusts tmux's DA1 SIXEL attribute when terminal-overrides supply Sxl",
+			"4243",
+			" 216: Sxl: (flag) true",
+			ImageProtocol.Sixel,
+		],
+	] as const) {
+		it.skipIf(process.platform === "win32")(name, async () => {
+			const replies = {
+				"display-message -p #{client_name}": "/dev/pts/3",
+				"show-messages -T -t /dev/pts/3": `Terminal 0: st-256color for /dev/pts/3, flags=0x0:\n${capability}`,
+			};
+			await withFakeTmux(replies, async binDir => {
+				const previousPath = Bun.env.PATH;
+				try {
+					Bun.env.PATH = `${binDir}:${previousPath ?? ""}`;
+					Bun.env.TMUX = `/tmp/tmux-1000/default,${socket},0`;
+					harness = createProcessTerminalRenderHarness(80, 24, { conpty: false });
+					const received: string[] = [];
+					harness.tui.addInputListener(data => {
+						received.push(data);
+					});
+
+					process.stdin.emit("data", "\x1b[?1;2;4c\x1b[?2;3;0Sx");
+					vi.advanceTimersByTime(251);
+
+					expect(received).toEqual(["x"]);
+					expect(TERMINAL.imageProtocol).toBe(expected);
+				} finally {
+					harness?.dispose();
+					harness = undefined;
+					restoreEnv("PATH", previousPath);
+				}
+			});
+		});
+	}
 
 	it("reassembles a DA1 advertisement split beyond the stdin flush deadline", () => {
 		harness = createProcessTerminalRenderHarness(80, 24, { conpty: true, nativeWindowsConsole: false });

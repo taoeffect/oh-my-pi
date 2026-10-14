@@ -1273,13 +1273,16 @@ describe("compact", () => {
 		expect(second.preserveData?.appKey).toBe("kept");
 	});
 
-	it("scrubs legacy ¶think: sections from the prior archive when thinking is excluded", async () => {
+	it("scrubs every paragraph of ¶think: sections from the prior archive when thinking is excluded", async () => {
 		const first = await snapcompact.compact(
 			makePreparation({
 				messagesToSummarize: [
 					createUserMessage("Investigate the flaky auth test."),
 					createAssistantMessage([
-						{ type: "thinking", thinking: "legacy private chain of thought" },
+						{
+							type: "thinking",
+							thinking: "First reasoning paragraph.\n\nSecond reasoning paragraph.\nThird reasoning line.",
+						},
 						{ type: "text", text: "The token clock is skewed." },
 					]),
 				],
@@ -1297,9 +1300,51 @@ describe("compact", () => {
 		);
 		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
 		expect(archiveText).not.toContain("¶think:");
-		expect(archiveText).not.toContain("legacy private chain of thought");
+		expect(archiveText).not.toContain("reasoning");
 		expect(archiveText).toContain("Investigate the flaky auth test.");
 		expect(archiveText).toContain("The token clock is skewed.");
+	});
+
+	it("scrubs multi-paragraph ¶think: sections from legacy archive text with real newlines", async () => {
+		const text =
+			"¶user: Investigate the flaky auth test.\n¶think: First reasoning paragraph.\n\nSecond reasoning paragraph.\n¶ai: The token clock is skewed.";
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("Continue after switching to Claude.")],
+				previousPreserveData: { snapcompact: { frames: [], totalChars: text.length, truncatedChars: 0, text } },
+			}),
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
+		expect(archiveText).not.toContain("reasoning");
+		expect(archiveText).toContain("Investigate the flaky auth test.");
+		expect(archiveText).toContain("The token clock is skewed.");
+	});
+
+	it("keeps a ¶think: line printed inside archived tool output", async () => {
+		const first = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createAssistantMessage([
+						{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "cat dump.txt" } },
+					]),
+					createToolResultMessage("dump start\n¶think: dumped line\ndump end"),
+					createAssistantMessage([{ type: "text", text: "Read the dump." }]),
+				],
+			}),
+			{ frameSize: TEST_FRAME_SIZE },
+		);
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("Continue after switching to Claude.")],
+				previousPreserveData: first.preserveData,
+			}),
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
+		expect(archiveText).toContain("¶think: dumped line");
+		expect(archiveText).toContain("dump end");
+		expect(archiveText).toContain("Read the dump.");
 	});
 
 	it("keeps legacy ¶think: sections when thinking stays included", async () => {
@@ -1406,6 +1451,143 @@ describe("archive helpers", () => {
 			truncatedChars: 0,
 		};
 		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: valid })).toEqual(valid);
+	});
+
+	it("getPreservedArchive carries a valid no-reasoning variant and drops a malformed one", () => {
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+		const variant: snapcompact.ArchiveView = {
+			summary: "plain legend",
+			archive: { frames: [frame], totalChars: 10, truncatedChars: 0, text: "¶ai: hi" },
+		};
+		const base = { frames: [frame], totalChars: 10, truncatedChars: 0 };
+		expect(
+			snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: { ...base, withoutThinking: variant } }),
+		).toEqual({ ...base, withoutThinking: variant });
+		for (const malformed of [
+			{ summary: "", archive: variant.archive },
+			{ summary: "s", archive: { frames: [] } },
+		]) {
+			expect(
+				snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: { ...base, withoutThinking: malformed } }),
+			).toEqual(base);
+		}
+	});
+
+	describe("viewWithoutThinking", () => {
+		const THINKING_SUMMARY =
+			"Archived transcript scopes:\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY";
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+
+		it("reads the stored variant, or the original when its summary declares no reasoning", () => {
+			const variant: snapcompact.ArchiveView = {
+				summary: "plain",
+				archive: { frames: [frame], totalChars: 10, truncatedChars: 0 },
+			};
+			const archive = { frames: [frame], totalChars: 10, truncatedChars: 0, withoutThinking: variant };
+			expect(snapcompact.viewWithoutThinking(THINKING_SUMMARY, archive)).toBe(variant);
+			const plain = { frames: [frame], totalChars: 10, truncatedChars: 0 };
+			expect(snapcompact.viewWithoutThinking("no scopes", plain)).toEqual({ summary: "no scopes", archive: plain });
+		});
+
+		it("fails closed to text edges without frames, reasoning or its legend", () => {
+			// The head edge ends inside a reasoning section: stripping the whole
+			// source before cutting the edges keeps its continuation out too.
+			const text =
+				"¶user: ask\n¶think: secret one\n\nsecret two\n¶ai: answer one\nfiller middle line\n¶ai: answer two";
+			const textHead = text.slice(0, text.indexOf("secret two") + 6);
+			const textTail = "¶ai: answer two";
+			const view = snapcompact.viewWithoutThinking(
+				THINKING_SUMMARY,
+				{ frames: [frame], totalChars: 100, truncatedChars: 5, text, textHead, textTail },
+				{ readFiles: ["src/a.ts"], modifiedFiles: [] },
+			);
+			expect(view.archive.frames).toEqual([]);
+			const blocks = snapcompact.historyBlocks(view.archive);
+			const sent = `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
+			expect(sent).not.toContain("¶think:");
+			expect(sent).not.toContain("secret");
+			expect(sent).not.toContain("assistant reasoning");
+			expect(sent).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
+			expect(sent).toContain("a.ts (Read)");
+			expect(view.archive.textHead).toStartWith("¶user: ask\n¶ai: answer one");
+			expect(view.archive.textTail).toBe(textTail);
+			const stripped = "¶user: ask\n¶ai: answer one\nfiller middle line\n¶ai: answer two";
+			expect(view.archive.truncatedChars).toBe(5 + stripped.length - textHead.length - textTail.length);
+		});
+
+		it("leaves out a tail's opening lines when the archive kept no whole source to scope them", async () => {
+			// Without `text` the tail may open inside a thought whose label sat in
+			// the dropped middle; both the fail-closed view and a re-render skip it.
+			const legacy = {
+				frames: [frame],
+				totalChars: 100,
+				truncatedChars: 0,
+				textHead: "¶user: ask\n¶ai: answer one",
+				textTail: "secret continuation\n¶ai: answer two",
+			};
+			const view = snapcompact.viewWithoutThinking(THINKING_SUMMARY, legacy);
+			const sent = snapcompact
+				.historyBlocks(view.archive)
+				.map(block => (block.type === "text" ? block.text : ""))
+				.join("\n");
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer two");
+
+			const rendered = await snapcompact.compact(
+				{
+					firstKeptEntryId: "kept",
+					messagesToSummarize: [createUserMessage("Continue.")],
+					turnPrefixMessages: [],
+					tokensBefore: 0,
+					previousPreserveData: { [snapcompact.PRESERVE_KEY]: legacy },
+					fileOps: snapcompact.createFileOps(),
+				},
+				{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+			);
+			const source = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
+			expect(source).not.toContain("secret");
+			expect(source).toContain("answer two");
+		});
+	});
+
+	it("textWithoutThinking drops reasoning sections and the reasoning scope from either legend wording", () => {
+		const summary = [
+			"- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.",
+			"- `¶user:`, `¶think:`, `¶ai:`, and `¶call:` open user, assistant reasoning, assistant reply, and tool-call scopes.",
+			"¶user: hi",
+			"¶think: hidden",
+			"¶ai: shown",
+		].join("\n");
+		expect(snapcompact.textWithoutThinking(summary)).toBe(
+			[
+				"- `¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.",
+				"- `¶user:`, `¶ai:`, and `¶call:` open user, assistant reply, and tool-call scopes.",
+				"¶user: hi",
+				"¶ai: shown",
+			].join("\n"),
+		);
+	});
+
+	it("re-renders an archive without the reasoning legend of a summary archived inside it", async () => {
+		// A compaction summary later archived as conversation keeps its legend
+		// mid-line in the normalized source, where no section boundary marks it.
+		const legend = "- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.";
+		const text = `¶user: 41822 Resume prior conversation.${snapcompact.NEWLINE_GLYPH}${legend}${snapcompact.NEWLINE_GLYPH}¶ai: done`;
+		const rendered = await snapcompact.compact(
+			{
+				firstKeptEntryId: "kept",
+				messagesToSummarize: [createUserMessage("Continue.")],
+				turnPrefixMessages: [],
+				tokensBefore: 0,
+				previousPreserveData: { snapcompact: { frames: [], totalChars: text.length, truncatedChars: 0, text } },
+				fileOps: snapcompact.createFileOps(),
+			},
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
+		expect(archiveText).not.toContain("¶think:");
+		expect(archiveText).not.toContain("assistant reasoning");
+		expect(archiveText).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
 	});
 
 	it("stripPreservedArchive drops the frame archive and collapses to undefined when empty", () => {

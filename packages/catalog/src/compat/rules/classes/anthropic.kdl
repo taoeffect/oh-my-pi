@@ -25,6 +25,9 @@
 // https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models
 class "anthropic" {
 	prompt-cache-lookback 20
+	// Claude's input classifier refuses requests that quote earlier reasoning
+	// back as text (`reasoning_extraction`, issue #6093).
+	classifier-cot-extraction #true
 	thinking-replay-tokens "output"
 	// verified: billing matched this formula on Opus 4.7+ and Fable 5.1.
 	image-tokenization {

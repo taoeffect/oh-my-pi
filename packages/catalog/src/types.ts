@@ -1687,8 +1687,6 @@ export interface Model<TApi extends Api = Api> {
 	preferWebsockets?: boolean;
 	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */
 	useResponsesLite?: boolean;
-	/** Codex Code Mode restriction: model expects tools routed through a programmatic exec surface (mirrors codex-rs `tool_mode`). */
-	toolMode?: "code_mode_only";
 	/**
 	 * Service-tier ids the provider advertises for this model (Codex discovery
 	 * `service_tiers[].id`, e.g. `priority`, `ultrafast`). Absent when the

@@ -1,6 +1,4 @@
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
-import { cfgEditMode } from "../edit/settings";
-import { cfgEvalJs } from "../eval/settings";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -29,7 +27,6 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
-const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
@@ -137,44 +134,6 @@ export const cfgProvidersMaxInFlightRequests = register({
 effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
-
-export const cfgProvidersOpenaiCodexCodeMode = register({
-	id: "providers.openai-codex.codeMode",
-	type: "enum",
-	values: ["off", "on", "auto"] as const,
-	default: "off",
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Code Mode",
-		description:
-			"Route Codex code_mode_only models (GPT-5.6) through eval. The direct tools are eval, ask, todo, yield, think, checkpoint, and rewind. Use eval cells for other session tools. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
-	},
-});
-
-export const cfgProvidersOpenaiCodexCodeModeDirectTools = register({
-	id: "providers.openai-codex.codeModeDirectTools",
-	type: "array",
-	default: EMPTY_STRING_ARRAY,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Code Mode Direct Tools",
-		description:
-			"Extra direct tools for Codex Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
-	},
-});
-
-/**
- * Settings that change the Code Mode tool partition. `edit.mode` belongs here because it renames
- * `EditTool` on the wire (`apply_patch` vs `edit`), which the namespace metadata is keyed by.
- */
-export const cfgCodeModeInputs = combine({
-	codeMode: cfgProvidersOpenaiCodexCodeMode,
-	directTools: cfgProvidersOpenaiCodexCodeModeDirectTools,
-	evalJs: cfgEvalJs,
-	editMode: cfgEditMode,
-});
 
 export const cfgImagesDescribeForTextModels = register({
 	id: "images.describeForTextModels",

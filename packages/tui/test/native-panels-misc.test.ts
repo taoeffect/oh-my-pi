@@ -249,7 +249,15 @@ describe("BtwHistoryPanel native events", () => {
 		});
 		const click = (act: string): void =>
 			history.handleNativeEvent({ type: "action", key: `actions/${act}`, act, mods: [] });
-		click("copy");
+		// Click the act the rendered button carries: `copy` would be the terminal-local
+		// action, which copies the button's own label and never reaches the panel.
+		const copyAct = findNode(
+			history.describe(),
+			node => node.p?.role === "omp.btn" && String(node.p?.title).startsWith("Copy answer"),
+		)?.p?.actions?.click;
+		expect(copyAct).toBeDefined();
+		expect(copyAct).not.toBe("copy");
+		click(copyAct!);
 		expect(onCopy).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }));
 		click("follow-up");
 		expect(findNode(history.describe(), node => node.key === "composer")).toBeDefined();

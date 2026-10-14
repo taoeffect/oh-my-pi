@@ -622,6 +622,28 @@ async function writeOwnedProfilePreferences(file: string): Promise<void> {
 	}
 }
 
+/**
+ * Discard Chromium's session-restore state in a persistent profile OMP owns.
+ * When the first window of a new Chromium process opens, it reopens every page
+ * recorded in `Default/Sessions`, however the previous process exited. On the
+ * project-shared browser that resurrects whatever was open when its
+ * predecessor stopped or was killed, and no omp process owns those pages:
+ * target ownership dies with the browser instance, so neither idle-close nor
+ * the orphan reaper ever closes them. Call this before a Chromium process
+ * starts on the profile. Best-effort: a failure is logged and never blocks the
+ * launch.
+ */
+export async function discardOwnedProfileSessions(userDataDir: string): Promise<void> {
+	try {
+		await removeWithRetries(path.join(userDataDir, "Default", "Sessions"));
+	} catch (error) {
+		logger.warn("Could not discard browser profile session state", {
+			userDataDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
 /** Fully resolved executable and argv for a broker-spawned shared Chromium. */
 export interface SharedBrowserLaunchSpec {
 	executablePath: string;

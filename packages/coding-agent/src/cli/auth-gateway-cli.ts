@@ -33,7 +33,7 @@ import {
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
-import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -599,7 +599,11 @@ function pickProbeCandidates(provider: string): Model<Api>[] {
 		if (model.maxTokens !== null && model.maxTokens <= 0) return false;
 		return true;
 	});
-	candidates.sort((a, b) => a.cost.input + a.cost.output - (b.cost.input + b.cost.output) || a.id.localeCompare(b.id));
+	const price = (model: Model<Api>): number => {
+		const { input, output } = getEffectiveTokenCost(model.cost);
+		return input + output;
+	};
+	candidates.sort((a, b) => price(a) - price(b) || a.id.localeCompare(b.id));
 	return candidates;
 }
 

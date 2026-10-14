@@ -1957,7 +1957,6 @@ describe("openai-codex streaming", () => {
 				clientMetadata: {
 					workspace_kind: "repo",
 					parent_turn_id: "forged-parent-turn",
-					code_mode_tool_names: "forged-code-mode",
 					"x-codex-turn-metadata": '{"thread_id":"caller"}',
 				},
 				parentTurnId: "turn_parent-1",
@@ -1991,11 +1990,6 @@ describe("openai-codex streaming", () => {
 		// x-codex-turn-metadata JSON blob.
 		expect(metadata.parent_turn_id).toBe("turn_parent-1");
 		expect(turnMetadata.parent_turn_id).toBe("turn_parent-1");
-		// `code_mode_tool_names` is likewise reserved (codex-rs
-		// CODE_MODE_TOOL_NAMES_KEY, #35271): OMP never emits it, and caller extras
-		// cannot smuggle it into either projection.
-		expect(metadata.code_mode_tool_names).toBeUndefined();
-		expect(turnMetadata.code_mode_tool_names).toBeUndefined();
 		expect(capturedHeaders?.["x-codex-installation-id"]).toBeUndefined();
 		expect(metadata.session_id).toBe(capturedHeaders?.["session-id"]);
 		expect(metadata.thread_id).toBe(capturedHeaders?.["thread-id"]);

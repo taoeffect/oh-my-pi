@@ -10,8 +10,9 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
 	denyError,
 	formatApprovalPrompt,
@@ -77,7 +78,13 @@ function renderOptionsWithTheme<T extends object>(options: T, theme: Theme): T &
  */
 export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 	declare name: string;
-	declare description: string;
+	get description(): string {
+		const description = this.registeredTool.definition.description;
+		const guidance = this.runner.getNativeDelegationGuidance(this.name);
+		return guidance
+			? prompt.render(nativeDelegationTemplate, { description, name: this.name, guidance })
+			: description;
+	}
 	declare parameters: any;
 	declare label: string;
 	declare strict: boolean;

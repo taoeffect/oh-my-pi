@@ -23,21 +23,47 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 **Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
 
-## GitHub
+## Fork: Features Kept Over Upstream
 
-- Before posting a GitHub comment or creating an issue, MUST show the target and proposed text and obtain user confirmation. An explicit instruction to post supplied text to a specified target already counts as confirmation.
-- A request to address or fix PR feedback permits drafting replies, not posting them without confirmation. A request only to get or check comments is read-only.
-- When authorized to resolve review feedback, MUST verify the fix, obtain approval for a factual reply citing the change and verification, and post it in the existing thread before resolving. NEVER resolve if the reply is unapproved or posting fails.
-- Permission to work on a PR does not authorize unrelated comments or issue creation.
+This repo is a fork. The `mine` branch gets upstream `main` by merge. Each feature listed below MUST stay as the fork has it, even when upstream changes, replaces, or removes it. This rule applies to every merge, rebase, cherry-pick, and conflict fix. An instruction to "take upstream" or "accept theirs" does not cancel it, unless the user names the feature.
 
-### Pull requests
+### How to merge upstream
 
-When authorized to create or edit a contributor-submitted PR, follow the checklist below. RoboOMP-managed PRs follow their dedicated workflow and enforced body format in `python/robomp/src/prompts/system_append.md` instead.
+1. Read every feature entry below before you fix a conflict.
+2. In a conflict that touches a listed feature, keep the fork side (`ours` when you merge `main` into `mine`).
+3. Check the files that merged with no conflict too. Upstream can replace a feature with no conflict markers, for example by changing an import. Search `packages/` and `docs/` for the entry's **Markers**. Any match means the rejected upstream change got in.
+4. Remove the rejected upstream change from every file, not only from the conflict blocks. Reverse its commits file by file, newest first: `git show --format= <commit> -- <file> | git apply -R --3way`. If upstream changed a file only in those commits, restore that file from the fork side (`git checkout HEAD -- <file>`). Keep all other upstream changes in the same files.
+5. Remove the rejected change's changelog entries, docs, keybindings, and tests.
+6. Run `bun check` and the entry's **Check** steps. The merge is not done until they pass.
+7. If upstream adds more commits that change a listed feature, add those commits and their new symbols to the entry.
 
-- MUST read `CONTRIBUTING.md` and `.github/PULL_REQUEST_TEMPLATE.md` first. Preserve the template sections and checklist, including when shortening an existing description.
-- MUST obtain at least one sentence written by the contributor in their own words explaining what changed and why, as required by `CONTRIBUTING.md`. If it is missing, ask the contributor; NEVER generate a substitute. Preserve that sentence during edits.
-- For user-facing changes, MUST follow the [Changelog](#changelog) attribution rules. Internal issue fixes keep their issue links. For external contributions, add the PR link and contributor credit after GitHub assigns the number, then push the entry before marking the changelog checklist item complete.
-- MUST read back the published PR description after creating or editing it. Check only verified checklist items; explain skipped or inapplicable checks in `Testing`.
+### How to add a feature
+
+Add one `###` subsection per feature below this one. Use these fields:
+
+- **Keep**: what the user sees, in one or two sentences.
+- **Fork code**: the files and symbols that must stay.
+- **Rejected upstream**: the upstream PRs and commits that change the feature, and what they do.
+- **Markers**: symbols from the rejected change. After a merge, `packages/` and `docs/` MUST have zero matches.
+- **Check**: the tests and manual steps that prove the feature still works.
+
+### Tool approval select menu
+
+- **Keep**: A tool call that needs approval shows a select menu in the TUI. The user picks an option with the arrow keys and `Enter`. The options are `Approve`, `Approve <tool> Commands for Session`, `Approve Similar <tool> Commands for Session`, and `Deny`. The two session options show only when session grants are allowed for the call. Eval prelude calls show `Approve` and `Deny`.
+- **Fork code**:
+  - `packages/coding-agent/src/extensibility/extensions/wrapper.ts`: `formatApprovalPrompt` + `uiContext.select(...)` with the options above, then `approveToolForSession`, `addSimilarApproval`, and `addFileApprovals` for the chosen option.
+  - `packages/coding-agent/src/tools/session-approvals.ts`, `approval-similarity.ts`, `approval-write-targets.ts`.
+  - `packages/coding-agent/src/tools/approval.ts`: `formatApprovalPrompt`, `truncateForPrompt`, `isTruncatedForPrompt`.
+  - `packages/coding-agent/src/eval/preludes.ts`: `approvePreludeInvocation` calls `ui.select(formatApprovalPrompt(...), ["Approve", "Deny"])`.
+  - `labelHighlight` on `ExtensionUISelectOption` (`extensions/types.ts`) and `HookSelectorOption` (`packages/tui/src/overlays/hook-selector.ts`).
+  - `metadataForProvider` in `packages/coding-agent/src/extensibility/custom-tools/types.ts`.
+  - `AgentTool.formatApprovalDetails(args)` takes one parameter. Tools truncate details with `truncateForPrompt`.
+  - The "Session-scoped approvals" section in `docs/approval-mode.md`.
+- **Rejected upstream**: PRs [#15548](https://github.com/can1357/oh-my-pi/pull/15548) and [#15550](https://github.com/can1357/oh-my-pi/pull/15550) (upstream 18.10.4), commits `fb55edd1ac`, `0c672238ff`, `a32827606f`, `eaf58a862b`. They replace the menu with a dialog that takes the place of the composer. The user approves with `Ctrl+Enter` or `Ctrl+Q`, and the session options are gone. They also add a compact prompt and a second `options` parameter to `formatApprovalDetails`.
+- **Markers**: `requestApproval|ApprovalDialogComponent|approval-dialog|ExtensionApprovalPrompt|showCollabAwareApproval|truncateApprovalDetail|ApprovalDetailsOptions|compactApprovalDetail|matchesAppApprove|appApproveKeys|app\.approval\.approve|ui\.approve`
+- **Check**:
+  - `bun test` in `packages/coding-agent` for `test/extensions-runner.test.ts`, `test/acp-agent.test.ts`, `test/tools/approval.test.ts`, and `test/modes/controllers/event-controller-approval-title.test.ts`, and in `packages/tui` for `test/hook-selector-overflow.test.ts`.
+  - Run `omp` with `tools.approvalMode: always-ask` and ask for a `bash` call. The menu MUST show the 4 options, and `Enter` on an option MUST answer it.
 
 ## Code Quality
 
@@ -341,6 +367,6 @@ Location: `packages/*/CHANGELOG.md` (per package).
 ## Releasing
 
 1. Ensure all changes since last release are in each affected package's `[Unreleased]` section.
-2. Run `bun run release`.
+2. User (not agent) manually runs `bun scripts/taoeffect/bump-version-and-release.ts`
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.

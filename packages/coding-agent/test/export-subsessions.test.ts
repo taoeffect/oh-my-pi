@@ -10,7 +10,7 @@ import { collectSubSessions } from "../src/session/sub-sessions";
 /**
  * Contract: a session at `<dir>/<name>.jsonl` embeds subagent transcripts from
  * `<dir>/<name>/<AgentId>.jsonl` (recursively) under slash-joined keys, with
- * parent links and last-entry leaf ids. Corrupt/empty/backup files are skipped.
+ * parent links and replayed leaf ids. Corrupt/empty/backup files are skipped.
  */
 
 function sessionJsonl(
@@ -73,6 +73,23 @@ describe("collectSubSessions", () => {
 		expect(subs.Alpha.header?.id).toBe("alpha");
 		expect(subs["Alpha/Child"]).toMatchObject({ agentId: "Child", parent: "Alpha", leafId: "c1" });
 		expect(subs.Beta).toMatchObject({ agentId: "Beta", parent: null, leafId: "b1" });
+	});
+
+	test("selects the leaf a late completion-probe usage entry restored", async () => {
+		const lateUsage = JSON.stringify({
+			type: "model_usage",
+			id: "probe",
+			parentId: "a1",
+			timestamp: "2026-06-12T00:00:02.000Z",
+			activeLeafId: "a2",
+			purpose: "task-completion-probe",
+			usage: { cost: { total: 0.01 } },
+		});
+		await Bun.write(path.join(root, "main/Alpha.jsonl"), `${sessionJsonl("alpha", ["a1", "a2"])}${lateUsage}\n`);
+
+		const subs = await collectSubSessions(mainFile);
+
+		expect(subs.Alpha.leafId).toBe("a2");
 	});
 
 	test("omits internal routing and move history from standalone HTML and nested sessions", async () => {

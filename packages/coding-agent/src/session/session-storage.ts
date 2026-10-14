@@ -1231,6 +1231,22 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
+	 * Rename `replacement` over the session file `fpath` under the
+	 * cross-process publish lock that serializes appends and rewrites, when
+	 * `unchanged` still accepts the file there. Returns whether it renamed.
+	 * Throws {@link SessionLockError} while another writer holds the lock.
+	 */
+	replaceSessionFileSync(fpath: string, replacement: string, unchanged: () => boolean): boolean {
+		let replaced = false;
+		this.#withPublishLock(fpath, () => {
+			if (!unchanged()) return;
+			this.renameSync(replacement, fpath);
+			replaced = true;
+		});
+		return replaced;
+	}
+
+	/**
 	 * The lease is an OS lock (abstract socket, named mutex, or `flock` sidecar
 	 * under ~/.omp/run/session-owners), so the kernel drops a dead owner's claim.
 	 * Never throws: a lock that cannot be taken for another reason counts as

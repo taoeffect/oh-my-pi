@@ -498,15 +498,12 @@ interface CodexCompatibilityIdentity {
 	affinitySessionId?: string;
 	threadId: string;
 	windowId: string;
-	/** Header projection: identity fields only, never the Code Mode snapshot. */
-	turnMetadataHeaderJson?: string;
+	turnMetadataJson?: string;
 }
 
 interface CodexRequestMetadata extends CodexCompatibilityIdentity {
 	turnId: string;
-	/** Canonical body projection, including `tool_namespaces_info` when present. */
 	turnMetadataJson: string;
-	turnMetadataHeaderJson: string;
 	clientMetadata: Record<string, string>;
 }
 
@@ -523,11 +520,6 @@ const CODEX_RESERVED_METADATA_KEYS: Record<string, true> = {
 	[OPENAI_HEADERS.SUBAGENT]: true,
 	request_kind: true,
 	compaction: true,
-	// codex-rs retired `code_mode_tool_names` in favor of `tool_namespaces_info`
-	// for its Responses Lite Code Mode mapping; both stay reserved so callers
-	// cannot smuggle them in as extras.
-	code_mode_tool_names: true,
-	tool_namespaces_info: true,
 	turn_started_at_unix_ms: true,
 	forked_from_thread_id: true,
 	parent_thread_id: true,
@@ -633,7 +625,6 @@ function createCodexRequestMetadata(
 		clientMetadata?: Readonly<Record<string, string>>;
 		parentTurnId?: string;
 		compaction?: CodexCompactionRequestContext;
-		toolNamespacesInfo?: unknown;
 		affinitySessionId?: string;
 	},
 ): CodexRequestMetadata {
@@ -674,17 +665,7 @@ function createCodexRequestMetadata(
 		turnMetadata.turn_started_at_unix_ms = session.turnStartedAtUnixMs;
 	}
 	for (const key in extra) turnMetadata[key] = extra[key];
-	// The `x-codex-turn-metadata` header is capped at 100KB by the Codex
-	// backend, while `tool_namespaces_info` grows with the session's tool count
-	// (409 tools ~ 100KB on its own). The body's `client_metadata` is the
-	// canonical envelope, so the snapshot rides there only and the header keeps
-	// the fixed-size identity projection.
-	const turnMetadataHeaderJson = toAsciiJsonString(turnMetadata);
-	let turnMetadataJson = turnMetadataHeaderJson;
-	if (options.toolNamespacesInfo !== undefined) {
-		turnMetadata.tool_namespaces_info = options.toolNamespacesInfo;
-		turnMetadataJson = toAsciiJsonString(turnMetadata);
-	}
+	const turnMetadataJson = toAsciiJsonString(turnMetadata);
 	const clientMetadata: Record<string, string> = {
 		[OPENAI_HEADERS.INSTALLATION_ID]: identity.installationId,
 		session_id: identity.sessionId,
@@ -701,7 +682,6 @@ function createCodexRequestMetadata(
 		affinitySessionId: options.affinitySessionId,
 		turnId: session.turnId,
 		turnMetadataJson,
-		turnMetadataHeaderJson,
 		clientMetadata,
 	};
 }
@@ -710,8 +690,8 @@ function applyCodexCompatibilityHeaders(headers: Headers, metadata: CodexCompati
 	headers.set(OPENAI_HEADERS.SCOPED_SESSION_ID, metadata.affinitySessionId ?? metadata.sessionId);
 	headers.set(OPENAI_HEADERS.THREAD_ID, metadata.threadId);
 	headers.set(OPENAI_HEADERS.WINDOW_ID, metadata.windowId);
-	if (metadata.turnMetadataHeaderJson) {
-		headers.set(OPENAI_HEADERS.TURN_METADATA, metadata.turnMetadataHeaderJson);
+	if (metadata.turnMetadataJson) {
+		headers.set(OPENAI_HEADERS.TURN_METADATA, metadata.turnMetadataJson);
 	} else {
 		headers.delete(OPENAI_HEADERS.TURN_METADATA);
 	}
@@ -1531,7 +1511,6 @@ function createCodexRequestContext(
 		clientMetadata: transformedBody.client_metadata,
 		parentTurnId: options?.parentTurnId,
 		compaction,
-		toolNamespacesInfo: options?.toolNamespacesInfo,
 		affinitySessionId: normalizeOpenAIPromptCacheKey(options?.parentSessionId),
 	});
 	transformedBody.client_metadata = requestMetadata.clientMetadata;

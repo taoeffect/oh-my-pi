@@ -3,7 +3,10 @@
 
 # Results
 `outputSchema` parsed payload, even invalid: `agent://<id>` (field `/<field>`, nested `/reports/0/data`); invalid preview inline.
-{{/if}}{{/if}}
+{{/if}}
+
+{{asyncGuidance}}
+{{/if}}
 
 # Delegation
 Use most specific agent.{{#if scoutAvailable}} Read-only research MUST use `scout` only when files unknown.{{/if}} Prefer one agent to investigate + edit. Omit `agent` only for default (`{{defaultAgent}}`); NEVER specify it.

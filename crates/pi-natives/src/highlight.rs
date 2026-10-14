@@ -204,7 +204,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["cs", "csharp"], "C#"),
 	(&["php"], "PHP"),
 	(&["sh", "bash", "zsh", "shell"], "Bash"),
-	(&["ps1", "powershell"], "PowerShell"),
+	(&["ps1", "powershell", "pwsh"], "PowerShell"),
 	(&["html", "htm", "vue", "svelte"], "HTML"),
 	(&["astro"], "Astro"),
 	(&["css"], "CSS"),
@@ -702,6 +702,7 @@ pub fn supports_language(lang: JsString) -> Result<bool> {
 fn supports_language_impl(lang: &str) -> bool {
 	find_syntax(get_syntax_set(), lang).is_some()
 }
+
 /// Get list of supported languages.
 #[napi]
 pub fn get_supported_languages() -> Vec<String> {
@@ -886,6 +887,39 @@ mod tests {
 			highlight_into(chunk, ss, &mut parse_state, &mut scope_stack, &pal, &mut chunked);
 		}
 		assert_eq!(chunked, whole);
+	}
+
+	/// Regression (#15008): `pwsh` fences resolve to PowerShell and keep their
+	/// colors across lines: a command continued after `|` is not painted as a
+	/// string, text after a `{0:N2}` placeholder stays string, and a
+	/// C#-looking here-string body still parses (an unresolved embedded
+	/// grammar fails the line, which renders uncolored).
+	#[test]
+	fn highlights_multiline_pwsh_fences() {
+		let code = "Get-ChildItem |\n  Where-Object { $_.Length -gt 1 }\n\"{0:N2} total\" -f \
+		            $x\nAdd-Type @'\nusing System;\n'@\nWrite-Host \"done\" # tail\n";
+		let out = highlight_code_impl(code, Some("pwsh"), &test_colors());
+		let lines: Vec<&str> = out.lines().collect();
+		assert!(
+			!lines[1].contains("<s>Where-Object"),
+			"piped command painted as string: {}",
+			lines[1]
+		);
+		assert!(
+			lines[2].contains("<s>") && lines[2].contains("total"),
+			"format string lost color: {}",
+			lines[2]
+		);
+		assert!(
+			lines[4].contains("<s>using System;"),
+			"here-string body lost string color: {}",
+			lines[4]
+		);
+		assert!(
+			lines[6].contains("<s>done") && lines[6].contains("<c>"),
+			"trailing line lost colors: {}",
+			lines[6]
+		);
 	}
 
 	#[test]

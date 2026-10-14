@@ -157,6 +157,7 @@ interface TaskDescriptionOptions {
 	structured: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
+	asyncGuidance: string;
 	parentSpawns: string;
 }
 
@@ -195,6 +196,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasModelMentions: options.sessionAgents.length > 0,
 		ircEnabled: options.ircEnabled,
+		asyncGuidance: options.asyncGuidance,
 	});
 }
 
@@ -690,6 +692,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return renderTaskCall(repairTaskParams(args as TaskParams), options, theme);
 	}
 
+	/** Background-job lifecycle contract; inherited by extension replacements that delegate to Task. */
+	get delegationGuidance(): string {
+		if (!cfgAsyncEnabled.get(this.session.settings)) return "";
+		return prompt.render(taskAsyncContractTemplate, {
+			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			waitTool: hasWaitTool(this.session),
+		});
+	}
+
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
@@ -709,6 +720,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
 	}
@@ -1146,9 +1158,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const guidance = prompt
-			.render(taskAsyncContractTemplate, { ircEnabled, waitTool: hasWaitTool(this.session) })
-			.trim();
 		const renderSpawnFeedback = (mixed: boolean): string =>
 			prompt
 				.render(taskSpawnFeedbackTemplate, {
@@ -1162,7 +1171,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agentLabel,
 					started,
 					scheduleFailureSummary,
-					guidance,
 				})
 				.trim();
 
