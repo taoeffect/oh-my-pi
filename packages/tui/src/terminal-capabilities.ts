@@ -12,15 +12,34 @@ import {
 } from "./kitty-graphics";
 import {
 	isInsideTerminalMultiplexer,
+	isTerminalBackgroundQueryTrusted,
 	routeTerminalMultiplexerNotification,
 	terminalMultiplexerForTerm,
 	terminalMultiplexerSessions,
 } from "./terminal-multiplexer";
-import { resolveTmuxClientTerminalName, wrapTmuxPassthroughIfNeeded } from "./tmux";
+import { resolveTmuxClientTerminalNames, wrapTmuxPassthroughIfNeeded } from "./tmux";
+import { detectTerminalBackground } from "./theme/theme";
 import type { HangulCompatibilityJamoWidth } from "./utils";
 
 export * from "./terminal-multiplexer";
 export { wrapTmuxPassthrough } from "./tmux";
+
+/** Last valid OSC 11 background, packed as 0xRRGGBB. */
+let terminalBackgroundColor: number | undefined;
+
+/**
+ * Trusted terminal background when reported; otherwise black for detected dark
+ * appearance or white for detected light appearance, using theme auto-detection.
+ */
+export function getTerminalBackgroundColor(): number {
+	if (isTerminalBackgroundQueryTrusted() && terminalBackgroundColor !== undefined) return terminalBackgroundColor;
+	return detectTerminalBackground() === "light" ? 0xffffff : 0x000000;
+}
+
+/** Store an OSC 11 background, or reset to appearance detection (also for tests). */
+export function setTerminalBackgroundColor(color: number | undefined): void {
+	terminalBackgroundColor = color;
+}
 
 export enum ImageProtocol {
 	Kitty = "\x1b_G",
@@ -469,9 +488,10 @@ function getFallbackImageProtocol(
 	if (!isTTY) return null;
 	if (terminalId === "vscode" || terminalId === "alacritty") return null;
 	const term = env.TERM?.toLowerCase() ?? "";
-	if (term.includes("screen") || term.includes("tmux") || term.includes("ghostty")) {
-		return ImageProtocol.Kitty;
-	}
+	// tmux TERM names the pane, not the attached client's graphics support.
+	// Leave unknown clients unselected so the runtime SIXEL probe can run.
+	if (env.TMUX || term.includes("tmux")) return null;
+	if (term.includes("screen") || term.includes("ghostty")) return ImageProtocol.Kitty;
 	return null;
 }
 /**
@@ -661,9 +681,11 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	if (programId) return programId;
 
 	// tmux >= 3.2 replaces the pane's identity with `TERM_PROGRAM=tmux`.
-	// Its server still holds the attached client's terminal-type reply.
-	const clientProgramId = fromProgram(resolveTmuxClientTerminalName(env) ?? undefined);
-	if (clientProgramId) return clientProgramId;
+	// Its server still holds the attached client's terminal-type reply and TERM.
+	for (const clientProgram of resolveTmuxClientTerminalNames(env)) {
+		const clientProgramId = fromProgram(clientProgram);
+		if (clientProgramId) return clientProgramId;
+	}
 
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";
 	if (TERM && caseEq(TERM, "monstar")) return "monstar";
@@ -954,6 +976,21 @@ export function parseKittyDirectPlacementLine(line: string): ParsedKittyPlacemen
 	};
 }
 
+/** `ESC 7` + `CUU(n)` lead-in of an {@link Image} direct-placement line. */
+const DIRECT_PLACEMENT_LIFT = /^\x1b7\x1b\[(\d+)A/;
+
+/**
+ * Rows above its own line that an {@link Image} direct-placement line paints
+ * over: the `CUU(rows-1)` of its lead-in, or 0 for any other line. The renderer
+ * erases those rows before a SIXEL/iTerm2 block is written again, because
+ * those protocols have no delete command and the block's reserved rows are
+ * byte-identical between frames, so the diff never rewrites them.
+ */
+export function directPlacementLift(line: string): number {
+	const m = DIRECT_PLACEMENT_LIFT.exec(line);
+	return m ? Number(m[1]) : 0;
+}
+
 /**
  * Rebuild an {@link Image} direct-placement line for the viewport row it is
  * written at. The component-rendered line encodes `CUU(rows-1)`, which clamps
@@ -1231,9 +1268,14 @@ export function getImageDimensions(base64Data: string, mimeType: string): ImageD
  * thread; `null` when the encode fails. For output that cannot wait for an
  * off-thread encode.
  */
-export function encodeSixelNow(base64Data: string, widthPx: number, heightPx: number): string | null {
+export function encodeSixelNow(
+	base64Data: string,
+	widthPx: number,
+	heightPx: number,
+	backgroundRgb = getTerminalBackgroundColor(),
+): string | null {
 	try {
-		return encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx);
+		return encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx, backgroundRgb);
 	} catch {
 		return null;
 	}
@@ -1292,25 +1334,15 @@ export function renderImage(
 	}
 
 	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
-		// SIXEL encodes in 6-pixel vertical bands. A height that is not a
-		// multiple of 6 is padded with transparent rows, but the terminal
-		// still allocates cell rows for the padded height. When the padded
-		// height crosses a cell boundary the terminal uses one more row
-		// than fit.rows, so the next line of content overwrites the bottom
-		// of the image — a visible slice stripped from the image. Round the
-		// encode height DOWN to the largest multiple of 6 that fits within
-		// the requested row budget, so the band boundary aligns without
-		// padding and the reserved row count never exceeds fit.rows. Scale
-		// the width by the same ratio so resize_exact preserves the aspect
-		// ratio instead of squashing the image vertically.
-		const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
-		const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
-		const heightScale = targetHeightPx / rawHeightPx;
-		const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
-		const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
-		const sequence = options.sixel
-			? options.sixel(targetWidthPx, targetHeightPx)
-			: encodeSixelNow(base64Data, targetWidthPx, targetHeightPx);
+		// Encode the cell box itself, so a raster drawn at the cell size
+		// (SvgFigure) is placed 1:1 instead of resampled. The encoder drops a
+		// partial last 6px band rather than letting the terminal pad it into
+		// the next row; only a box under one band (sub-6px cells) still takes
+		// the rows of a whole one.
+		const heightPx = fit.rows * cellDims.heightPx;
+		const widthPx = fit.columns * cellDims.widthPx;
+		const rows = heightPx < 6 ? Math.ceil(6 / cellDims.heightPx) : fit.rows;
+		const sequence = options.sixel ? options.sixel(widthPx, heightPx) : encodeSixelNow(base64Data, widthPx, heightPx);
 		if (sequence === null) return null;
 		// Undefined while the provider's encode is pending: the rows stay reserved.
 		return { sequence, rows };

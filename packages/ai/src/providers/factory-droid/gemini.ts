@@ -118,6 +118,11 @@ const GOOGLE_APIS: Record<string, true> = {
  * everything else is DROPPED (never demoted to visible text). A text block
  * keeps its signature only when this model signed it.
  *
+ * Tool-call names are encoded to their wire form here, before
+ * `transformMessages` drops calls whose names no provider could declare: the
+ * proxy accepts any caller tool name once sanitized, so a declared
+ * `my.tool/name` call must survive replay.
+ *
  * Only Google-origin turns are stamped as the target, so `transformMessages`
  * keeps their surviving signatures verbatim instead of demoting/stripping them
  * as cross-model. Their ids are plain in either stamp, so pairing is
@@ -137,8 +142,9 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
 			if (googleOrigin && block.thinking.trim() && signature && signature !== SKIP_THOUGHT_SIGNATURE) {
 				content.push(block);
 			}
-		} else if (block.type === "toolCall" && !googleOrigin && block.thoughtSignature) {
-			content.push({ ...block, thoughtSignature: undefined });
+		} else if (block.type === "toolCall") {
+			const thoughtSignature = googleOrigin ? block.thoughtSignature : undefined;
+			content.push({ ...block, name: sanitizeFactoryDroidToolName(block.name), thoughtSignature });
 		} else if (block.type === "text" && !sameModel && block.textSignature) {
 			content.push({ ...block, textSignature: undefined });
 		} else {
@@ -204,7 +210,7 @@ function toGeminiContents(
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
 					parts.push({
-						functionCall: { name: sanitizeFactoryDroidToolName(block.name), args: block.arguments },
+						functionCall: { name: block.name, args: block.arguments },
 						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
 					});
 				}

@@ -112,16 +112,6 @@ function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
 	);
 }
 
-function buildPrLargeDiffInstruction(ref: ReviewPrRef): string {
-	const prDiffUrl = `pr://${ref.repo}/${ref.number}/diff`;
-	return `MUST read assigned PR file diffs from \`${prDiffUrl}/all\` or per-file \`${prDiffUrl}/<index>\`; NEVER use local \`git diff\`/\`git show\` for PR diff content`;
-}
-
-function buildPrContextInstruction(ref: ReviewPrRef): string {
-	const prDiffUrl = `pr://${ref.repo}/${ref.number}/diff`;
-	return `MUST NOT read local workspace files for PR file context; use the fetched PR diff and \`${prDiffUrl}/all\` or per-file \`${prDiffUrl}/<index>\` only`;
-}
-
 /** Fetch one PR patch and freeze it before any overlay or LLM prompt is built; throws on fetch failure. */
 export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promise<ResolvedReviewTarget> {
 	try {
@@ -132,8 +122,7 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 			lookup.payload.unified,
 			`PR ${ref.repo}#${ref.number} has no diff content available`,
 			{
-				diffInstruction: buildPrLargeDiffInstruction(ref),
-				contextInstruction: buildPrContextInstruction(ref),
+				prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
 			},
 		);
 	} catch (error) {

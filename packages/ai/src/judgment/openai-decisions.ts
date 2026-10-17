@@ -7,7 +7,8 @@
  *
  * | System One                                  | Decisions                                     |
  * | ------------------------------------------- | --------------------------------------------- |
- * | `state` (text or JSON)                      | `input` (text; JSON state is serialized)      |
+ * | `state` (text or JSON)                      | `input` text (JSON serialized), or `input_text` for images |
+ * | separate images                            | ordered `input_image` data URLs in user input |
  * | question id                                 | `name`, echoed on its answer                  |
  * | `noul` + optional yes/no `criteria`         | `predicate`; criteria fold into instructions  |
  * | `choice` `criteria` option → rubric         | `choices: [{ value, description? }]`          |
@@ -19,6 +20,7 @@
  * tokens only, so cost is priced from the catalog model.
  */
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { embeddedImageDataUrl } from "../images/shared";
 import predicateTemplate from "./openai-decisions-predicate.md" with { type: "text" };
 import { type Answer, type Question, tokenUsage } from "./types";
 import { finiteNumber, type JudgmentWire } from "./wire";
@@ -99,12 +101,31 @@ function decodeAnswer(entry: Record<string, unknown>): Answer | undefined {
 
 /** OpenAI's `/v1/decisions` route. */
 export const openaiDecisionsWire: JudgmentWire = {
+	// https://developers.openai.com/api/reference/resources/decisions/methods/create/
+	images: { maxCount: 128 },
 	target: (baseUrl, _model, key) => ({ url: `${baseUrl}/decisions`, token: key }),
-	encode: (request, model) => ({
-		model,
-		input: typeof request.state === "string" ? request.state : JSON.stringify(request.state),
-		questions: Object.entries(request.questions).map(([name, question]) => encodeQuestion(name, question)),
-	}),
+	encode: (request, model) => {
+		const state = typeof request.state === "string" ? request.state : JSON.stringify(request.state);
+		return {
+			model,
+			input: request.images?.length
+				? [
+						{
+							role: "user",
+							content: [
+								{ type: "input_text", text: state },
+								...request.images.map(image => ({
+									type: "input_image",
+									image_url: embeddedImageDataUrl(image),
+									...(image.detail !== undefined ? { detail: image.detail } : {}),
+								})),
+							],
+						},
+					]
+				: state,
+			questions: Object.entries(request.questions).map(([name, question]) => encodeQuestion(name, question)),
+		};
+	},
 	decode(payload) {
 		if (!isRecord(payload) || !Array.isArray(payload.answers)) return undefined;
 		const answers: Record<string, Answer> = {};

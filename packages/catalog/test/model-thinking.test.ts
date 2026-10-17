@@ -598,6 +598,34 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(resellerFlash37)).toContain(Effort.Minimal);
 	});
 
+	it("drives Gemini 4 with thinkingLevel low/medium/high on the direct Google transports", () => {
+		// Google documents LOW/MEDIUM/HIGH for Argon and Argon Cyber Permissive:
+		// `thinkingBudget` and THINKING_LEVEL_MINIMAL both return 400.
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon
+		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive"]) {
+			for (const [provider, api] of [
+				["google-vertex", "google-vertex"],
+				["google", "google-generative-ai"],
+			] as const) {
+				// `reasoning: false` mirrors Gemini API discovery, which has no bundled
+				// Argon reference and infers non-reasoning from the id.
+				for (const reasoning of [true, false]) {
+					const argon = createModel({ id, api, provider, reasoning });
+					expect(argon.reasoning).toBe(true);
+					expect(argon.thinking?.mode).toBe("google-level");
+					expect(getSupportedEfforts(argon)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, argon)).toBe("MEDIUM");
+				}
+			}
+		}
+
+		// The Argon ladder must not leak onto other Gemini 4 lines. No Gemini 4 Pro
+		// ships yet; a future one must keep the Pro low/high ladder (and must not tie with it).
+		const vertexPro4 = createModel({ id: "gemini-4-pro", api: "google-vertex", provider: "google-vertex" });
+		expect(vertexPro4.thinking?.mode).toBe("google-level");
+		expect(getSupportedEfforts(vertexPro4)).toEqual([Effort.Low, Effort.High]);
+	});
+
 	it("bakes requiresEffort for Gemini 3.x on any provider and backfills explicit metadata", () => {
 		// Derivation: aggregator-hosted Gemini 3.5 gets the flag, 2.5 does not.
 		const openRouterFlash = createModel({

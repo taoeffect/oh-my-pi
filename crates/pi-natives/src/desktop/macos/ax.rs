@@ -1,15 +1,14 @@
+mod enablement;
 pub(crate) mod menus;
 mod popup;
 
 use std::{
-	collections::{HashSet, VecDeque},
+	collections::VecDeque,
 	ffi::c_void,
 	mem,
 	ops::Range,
 	ptr::{self, NonNull},
-	sync::{LazyLock, Mutex},
-	thread,
-	time::Duration,
+	sync::LazyLock,
 };
 
 use objc2_application_services::{
@@ -24,6 +23,7 @@ use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
 		backend::AxBackend,
+		control,
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
@@ -36,6 +36,8 @@ const AX_TIMEOUT_SECONDS: f32 = 2.0;
 const PROBE_TIMEOUT_SECONDS: f32 = 0.5;
 /// Bounded `AXParent` ascent when an element does not expose `AXWindow`.
 const MAX_ANCESTRY_DEPTH: usize = 40;
+/// The action that scrolls an element into its view.
+const SCROLL_TO_VISIBLE: &str = "AXScrollToVisible";
 /// Bounds the search for a sheet, popover, or open menu that `AXWindows` does
 /// not list, matching the snapshot walk's own node and depth budget.
 const MAX_ATTACHED_SEARCH_NODES: usize = 5_000;
@@ -215,10 +217,6 @@ static GET_WINDOW_ID: LazyLock<Option<GetWindowIdFn>> = LazyLock::new(|| {
 	}
 });
 
-/// Processes already asked to expose their renderer accessibility tree.
-static MANUAL_ACCESSIBILITY: LazyLock<Mutex<HashSet<libc::pid_t>>> =
-	LazyLock::new(|| Mutex::new(HashSet::new()));
-
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
 	fn AXUIElementCreateApplication(pid: libc::pid_t) -> *mut AXUIElement;
@@ -239,8 +237,18 @@ impl MacAx {
 	}
 
 	pub(super) fn raise(&mut self, window: &DesktopWindow) -> CoreResult<()> {
-		let root = self.window_root(window)?;
+		let root = Self::window_element(window)?;
 		self.perform(&root, "AXRaise")
+	}
+
+	/// `window`'s element for an operation on the window itself, such as
+	/// raising it or reading its menus: unlike
+	/// [`AxBackend::window_root`], it never waits for web content, so the
+	/// session's first read of the app still does.
+	pub(super) fn window_element(window: &DesktopWindow) -> CoreResult<AxHandle> {
+		let (_, _, element) = window_parts(window)?;
+		set_timeout(&element)?;
+		Ok(AxHandle::Mac(element))
 	}
 }
 
@@ -288,7 +296,9 @@ pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
 pub(super) fn window_records(pid: libc::pid_t) -> Option<Vec<AxWindowRecord>> {
 	(*GET_WINDOW_ID)?;
 	let app = probe_application(pid)?;
-	enable_web_accessibility(pid, &app);
+	// As on every window lookup, the role query switches on Chromium's web
+	// accessibility; only the first content read waits for it.
+	enablement::activate(&app);
 	let windows = copy_elements_optional(&app, "AXWindows")?;
 	// An unmappable sibling is still a possible keyboard destination. Dropping
 	// it would turn an incomplete AX tree into false proof of exclusivity.
@@ -427,6 +437,60 @@ enum AttachedSearch {
 	},
 }
 
+/// The accessibility window of `app` that represents `win`: matched by native
+/// window id, among `AXWindows` and then its sheets, popovers and open menus,
+/// or, without the window-id SPI, by a unique title and frame.
+fn find_window(app: &AXUIElement, win: &DesktopWindow) -> CoreResult<CFRetained<AXUIElement>> {
+	let windows = copy_elements(app, "AXWindows")?;
+	let expected_id = win.id.parse::<u32>().ok();
+	if let (Some(get_id), Some(expected_id)) = (*GET_WINDOW_ID, expected_id) {
+		for element in windows {
+			let mut actual_id = 0u32;
+			// SAFETY: `actual_id` is writable and this retained AX element
+			// remains alive for the call.
+			if unsafe { get_id(&element, &mut actual_id) } == AXError::Success
+				&& actual_id == expected_id
+			{
+				return Ok(element);
+			}
+		}
+		// Sheets, popovers, and open menus are separate native windows that
+		// `AXWindows` omits.
+		let truncated = match attached_window(app, expected_id, win)? {
+			AttachedSearch::Found(element) => return Ok(element),
+			AttachedSearch::Missing { truncated } => truncated,
+		};
+		let scope = if truncated {
+			format!(
+				"; the search stopped at its limit of {MAX_ATTACHED_SEARCH_NODES} nodes or depth \
+				 {MAX_ATTACHED_SEARCH_DEPTH}, so the window may be nested deeper"
+			)
+		} else {
+			String::new()
+		};
+		return Err(DesktopError::ax_failed(format!(
+			"native window {expected_id} was not found in the application's accessibility windows, \
+			 sheets, popovers, or open menus{scope}"
+		)));
+	}
+	// Without the native id SPI, require a unique title AND frame match.
+	// A same-title replacement window must never inherit a stale target.
+	let mut matches = windows.into_iter().filter(|element| {
+		copy_string(element, "AXTitle").as_deref() == Some(win.title.as_str())
+			&& bounds(element).is_some_and(|bounds| bounds_matches_window(bounds, win))
+	});
+	let element = matches.next().ok_or_else(|| {
+		DesktopError::ax_failed(format!(
+			"accessibility window for native window {} ('{}') was not found",
+			win.id, win.title,
+		))
+	})?;
+	if matches.next().is_some() {
+		return Err(DesktopError::ax_failed("accessibility window title/frame match is ambiguous"));
+	}
+	Ok(element)
+}
+
 /// Finds the sheet, popover, or open menu of `app` that represents `win`,
 /// by a bounded breadth-first walk of the application's accessibility tree.
 /// `AppKit` gives each its own `WindowServer` window but lists only standard
@@ -491,71 +555,32 @@ fn attached_window(
 	})
 }
 
+/// `win`'s owning process, its application element (role queried, which
+/// switches on Chromium's web accessibility) and its window element.
+fn window_parts(
+	win: &DesktopWindow,
+) -> CoreResult<(libc::pid_t, CFRetained<AXUIElement>, CFRetained<AXUIElement>)> {
+	ensure_trusted()?;
+	let pid = win.pid.ok_or_else(|| {
+		DesktopError::ax_failed(format!("window {} has no owning process id", win.id))
+	})?;
+	let pid = i32::try_from(pid).map_err(|_| {
+		DesktopError::ax_failed(format!("window {} has an invalid process id", win.id))
+	})?;
+	let app = create_application(pid)?;
+	set_timeout(&app)?;
+	enablement::activate(&app);
+	let element = find_window(&app, win)?;
+	Ok((pid, app, element))
+}
+
 impl AxBackend for MacAx {
+	/// For a read of the window's content: the session's first read of a
+	/// Chromium-family app waits for its web content ([`enablement`]).
 	fn window_root(&mut self, win: &DesktopWindow) -> CoreResult<AxHandle> {
-		ensure_trusted()?;
-		let pid = win.pid.ok_or_else(|| {
-			DesktopError::ax_failed(format!("window {} has no owning process id", win.id))
-		})?;
-		let pid = i32::try_from(pid).map_err(|_| {
-			DesktopError::ax_failed(format!("window {} has an invalid process id", win.id))
-		})?;
-		let app = create_application(pid)?;
-		set_timeout(&app)?;
-		enable_web_accessibility(pid, &app);
-		let windows = copy_elements(&app, "AXWindows")?;
-		let expected_id = win.id.parse::<u32>().ok();
-		if let (Some(get_id), Some(expected_id)) = (*GET_WINDOW_ID, expected_id) {
-			for element in &windows {
-				let mut actual_id = 0u32;
-				// SAFETY: `actual_id` is writable and this retained AX element
-				// remains alive for the call.
-				if unsafe { get_id(element, &mut actual_id) } == AXError::Success
-					&& actual_id == expected_id
-				{
-					set_timeout(element)?;
-					return Ok(AxHandle::Mac(element.clone()));
-				}
-			}
-			// Sheets, popovers, and open menus are separate native windows that
-			// `AXWindows` omits.
-			let truncated = match attached_window(&app, expected_id, win)? {
-				AttachedSearch::Found(element) => {
-					set_timeout(&element)?;
-					return Ok(AxHandle::Mac(element));
-				},
-				AttachedSearch::Missing { truncated } => truncated,
-			};
-			let scope = if truncated {
-				format!(
-					"; the search stopped at its limit of {MAX_ATTACHED_SEARCH_NODES} nodes or depth \
-					 {MAX_ATTACHED_SEARCH_DEPTH}, so the window may be nested deeper"
-				)
-			} else {
-				String::new()
-			};
-			return Err(DesktopError::ax_failed(format!(
-				"native window {expected_id} was not found in the application's accessibility \
-				 windows, sheets, popovers, or open menus{scope}"
-			)));
-		}
-		// Without the native id SPI, require a unique title AND frame match.
-		// A same-title replacement window must never inherit a stale target.
-		let mut matches = windows.into_iter().filter(|element| {
-			copy_string(element, "AXTitle").as_deref() == Some(win.title.as_str())
-				&& bounds(element).is_some_and(|bounds| bounds_matches_window(bounds, win))
-		});
-		let element = matches.next().ok_or_else(|| {
-			DesktopError::ax_failed(format!(
-				"accessibility window for native window {} ('{}') was not found",
-				win.id, win.title,
-			))
-		})?;
-		if matches.next().is_some() {
-			return Err(DesktopError::ax_failed(
-				"accessibility window title/frame match is ambiguous",
-			));
-		}
+		let (pid, app, element) = window_parts(win)?;
+		enablement::before_first_read(pid, &app, &element)?;
+		// The wait gives the window's requests shorter timeouts.
 		set_timeout(&element)?;
 		Ok(AxHandle::Mac(element))
 	}
@@ -647,14 +672,16 @@ impl AxBackend for MacAx {
 				actions.join(", "),
 			)));
 		}
-		let perform = || element_action_result(&native, send_action(element, &native));
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
 		if native == "AXRaise" {
-			perform()
-		} else {
-			skylight::with_background_guard(element_pid(element)?, perform)
+			return element_action_result(&native, send_action(element, &native));
 		}
+		let pid = element_pid(element)?;
+		let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
+		skylight::with_background_guard(pid, || {
+			press_into_view(&native, scroll_first, |action| send_action(element, action))
+		})
 	}
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
@@ -681,20 +708,30 @@ impl AxBackend for MacAx {
 		if let Some(current) = copy_date(element, "AXValue") {
 			return set_date_value(element, value, current);
 		}
-		skylight::with_background_guard(element_pid(element)?, || {
+		let pid = element_pid(element)?;
+		// Focus is borrowed only from an app already in the background as the
+		// call starts: only then does the guard below watch for the user
+		// and restore the front app.
+		let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
+		skylight::with_background_guard(pid, || {
+			// Apps commit what reaches their field editor; several (Contacts,
+			// Font Book, System Settings search) echo an AXValue write without
+			// ever taking it, so replace the text the way `typeText` inserts it.
+			if replace_native_text(element, pid, started_in_background, value)? {
+				return Ok(());
+			}
+			// The probes above can block; a run cancelled meanwhile writes
+			// nothing.
+			control::check()?;
 			set_string_value(element, "AXValue", value)?;
-			verify_text_value(element, value)
+			verify_text_value(element, value, value)
 		})
 	}
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
 		let element = mac_handle(h)?;
-		let attribute = CFString::from_str("AXFocused");
 		skylight::with_background_guard(element_pid(element)?, || {
-			// SAFETY: The singleton CFBoolean and retained element remain valid
-			// for the synchronous setter call.
-			let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
-			ax_result(error, "setting AXFocused=true failed")
+			ax_result(focus_element(element), "setting AXFocused=true failed")
 		})
 	}
 
@@ -827,14 +864,14 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
 	if process::is_terminal(element_pid(element)?) {
 		return Err(DesktopError::ax_failed(
-			"terminal AX text represents its rendered grid, not terminal input; use typeText or \
+			"terminal AX text represents its rendered grid, not terminal input; use win.type or \
 			 takeover:true instead",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
 		return Err(DesktopError::ax_failed(
 			"AX text writes cannot be verified in web content or an incomplete AX ancestry; use a \
-			 pixel click followed by typeText, or takeover:true input instead",
+			 pixel click followed by win.type, or takeover:true input instead",
 		));
 	}
 	Ok(())
@@ -860,15 +897,75 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 	)
 }
 
-fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
-	if copy_string(element, "AXValue").as_deref() == Some(expected) {
-		Ok(())
-	} else {
-		Err(DesktopError::ax_failed(
-			"AX accepted the text write but its complete value could not be confirmed; delivery may \
-			 be partial, inspect the target before retrying; no typing fallback was attempted",
-		))
+fn verify_text_value(element: &AXUIElement, sent: &str, expected: &str) -> CoreResult<()> {
+	text_readback(sent, expected, copy_string(element, "AXValue").as_deref(), is_secure(element))
+}
+
+fn is_secure(element: &AXUIElement) -> bool {
+	secure_subrole(copy_attribute_result(element, "AXSubrole").map(|value| {
+		match value {
+			None => Subrole::Absent,
+			Some(value) => value
+				.downcast::<CFString>()
+				.map_or(Subrole::Malformed, |value| Subrole::Named(value.to_string())),
+		}
+	}))
+}
+
+/// What an element answered for `AXSubrole`.
+enum Subrole {
+	Absent,
+	Named(String),
+	/// A value that is not a string.
+	Malformed,
+}
+
+/// A subrole that could not be read, or was not a string, counts as secure, so
+/// neither a timeout nor a malformed answer lets a password into an error; a
+/// field without one is not secure.
+fn secure_subrole(read: Result<Subrole, AXError>) -> bool {
+	match read {
+		Ok(Subrole::Absent) | Err(AXError::NoValue | AXError::AttributeUnsupported) => false,
+		Ok(Subrole::Named(subrole)) => subrole == "AXSecureTextField",
+		Ok(Subrole::Malformed) | Err(_) => true,
 	}
+}
+
+/// Exact equality is the verdict: a field that shows a rewritten value has
+/// not been shown to hold what was sent (Contacts regroups a phone number in
+/// the field and stores none of it). The error names what the field reads so
+/// the next step needs no extra read, except in a secure field, whose text
+/// never enters an error.
+fn text_readback(sent: &str, expected: &str, actual: Option<&str>, secure: bool) -> CoreResult<()> {
+	const SHOWN: usize = 200;
+	if actual == Some(expected) {
+		return Ok(());
+	}
+	if secure {
+		return Err(DesktopError::ax_failed(
+			"the secure text field's value could not be confirmed after the write; inspect the \
+			 target before writing again",
+		));
+	}
+	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
+	let Some(actual) = actual else {
+		return Err(DesktopError::ax_failed(format!(
+			"wrote {}, but the field's value could not be read back; inspect the target before \
+			 writing again",
+			quote(sent),
+		)));
+	};
+	let whole = if sent == expected {
+		String::new()
+	} else {
+		format!(" instead of {}", quote(expected))
+	};
+	Err(DesktopError::ax_failed(format!(
+		"wrote {}; the field now reads {}{whole}. The app may have reformatted it or not taken it: \
+		 inspect the target before writing again",
+		quote(sent),
+		quote(actual),
+	)))
 }
 
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
@@ -949,9 +1046,205 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	};
 	skylight::with_background_guard(pid, || {
 		set_string_value(&element, "AXSelectedText", text)?;
-		verify_text_value(&element, &expected)
+		verify_text_value(&element, text, &expected)
 	})?;
 	Ok(true)
+}
+
+/// Replaces a native text field's whole value through `AXSelectedText`, the
+/// path `typeText` uses, after focusing the field and selecting all of it.
+/// `false` means nothing was written and the caller may write `AXValue`.
+fn replace_native_text(
+	element: &AXUIElement,
+	pid: libc::pid_t,
+	may_borrow: bool,
+	text: &str,
+) -> CoreResult<bool> {
+	if !matches!(
+		copy_string(element, "AXRole").as_deref(),
+		Some("AXTextField" | "AXTextArea" | "AXComboBox")
+	) || is_secure(element)
+	{
+		return Ok(false);
+	}
+	replace_whole_value(&LiveField { element, pid, may_borrow }, text)
+}
+
+/// The AX steps of a whole-value replacement, kept apart so the order of its
+/// foreground checks can be tested without a live app.
+trait TextField {
+	type Element;
+	/// Whether the field holds its app's focus, which is app-local.
+	fn focused(&self) -> Option<bool>;
+	/// The element that holds the app's focus.
+	fn focus_owner(&self) -> Option<Self::Element>;
+	/// Whether another app is frontmost (`may_borrow_focus`).
+	fn in_background(&self) -> bool;
+	/// Whether an app that was in the background as the call started has since
+	/// come to the front, which means the user is working in it.
+	fn brought_forward(&self) -> bool;
+	fn focus(&self) -> AXError;
+	fn hand_focus_to(&self, owner: &Self::Element) -> AXError;
+	/// The whole value's UTF-16 length, when its selection is settable.
+	fn selectable_length(&self) -> Option<isize>;
+	fn select(&self, length: isize) -> AXError;
+	fn insert(&self, text: &str) -> CoreResult<()>;
+}
+
+fn replace_whole_value<F: TextField>(field: &F, text: &str) -> CoreResult<bool> {
+	// A setter the app did not answer may still apply, like `set_string_value`'s
+	// partial delivery: the `AXValue` fallback is skipped rather than written
+	// over a focus or selection that may have moved.
+	let mut unanswered = None;
+	// An unfocused Cocoa field has no field editor, so it publishes no
+	// settable selection until it is focused. Focus is borrowed only when the
+	// element that holds it is known, so it can be handed back.
+	let previous = if field.focused() == Some(true) {
+		None
+	} else {
+		let Some(owner) = field.focus_owner() else {
+			return Ok(false);
+		};
+		// Checked after the probes, which can block, and right before focusing.
+		if !field.in_background() {
+			return Ok(false);
+		}
+		// A run cancelled while the probes blocked changes nothing.
+		control::check()?;
+		match field.focus() {
+			AXError::Success => {},
+			AXError::CannotComplete => unanswered = Some("AXFocused"),
+			_ => return Ok(false),
+		}
+		Some(owner)
+	};
+	// Focusing can swap in the field editor, so the length is read afterward.
+	// The user may bring the app forward while those reads or the selection
+	// write block: a borrowed caret is theirs again, and a field the app had
+	// focused is theirs to type in, so neither is selected or typed over. Nor
+	// does a run cancelled meanwhile go on to write.
+	let still_borrowed = || {
+		(if previous.is_none() {
+			!field.brought_forward()
+		} else {
+			field.in_background()
+		}) && control::check().is_ok()
+	};
+	let selected = unanswered.is_none()
+		&& field.selectable_length().is_some_and(|length| {
+			still_borrowed()
+				&& match field.select(length) {
+					AXError::Success => still_borrowed(),
+					AXError::CannotComplete => {
+						unanswered = Some("AXSelectedTextRange");
+						false
+					},
+					_ => false,
+				}
+		});
+	if !selected {
+		// Nothing was written: hand focus back before the `AXValue` fallback,
+		// unless the user has since moved it off the borrowed field.
+		if let Some(previous) = previous
+			&& field.focused() == Some(true)
+		{
+			let error = field.hand_focus_to(&previous);
+			if error != AXError::Success {
+				return Err(DesktopError::ax_failed(format!(
+					"focused the field to replace its text, then could not hand focus back \
+					 ({error:?}); nothing was written"
+				)));
+			}
+		}
+		control::check()?;
+		if let Some(attribute) = unanswered {
+			return Err(DesktopError::ax_unconfirmed(format!(
+				"setting {attribute} to replace the field's text got no reply in time \
+				 (CannotComplete) and may still apply, so nothing was written: observe the window \
+				 before retrying"
+			)));
+		}
+		return Ok(false);
+	}
+	field.insert(text)?;
+	Ok(true)
+}
+
+struct LiveField<'a> {
+	element:    &'a AXUIElement,
+	pid:        libc::pid_t,
+	/// The app was in the background as the call started; see
+	/// `MacAx::set_value`.
+	may_borrow: bool,
+}
+
+impl TextField for LiveField<'_> {
+	type Element = CFRetained<AXUIElement>;
+
+	fn focused(&self) -> Option<bool> {
+		copy_bool(self.element, "AXFocused")
+	}
+
+	fn focus_owner(&self) -> Option<Self::Element> {
+		probe_application(self.pid).and_then(|app| copy_element(&app, "AXFocusedUIElement"))
+	}
+
+	fn in_background(&self) -> bool {
+		self.may_borrow && may_borrow_focus(skylight::front_pid(), self.pid)
+	}
+
+	fn brought_forward(&self) -> bool {
+		self.may_borrow && !may_borrow_focus(skylight::front_pid(), self.pid)
+	}
+
+	fn focus(&self) -> AXError {
+		focus_element(self.element)
+	}
+
+	fn hand_focus_to(&self, owner: &Self::Element) -> AXError {
+		focus_element(owner)
+	}
+
+	fn selectable_length(&self) -> Option<isize> {
+		if !attribute_settable(self.element, "AXSelectedText")
+			|| !attribute_settable(self.element, "AXSelectedTextRange")
+		{
+			return None;
+		}
+		Some(copy_string(self.element, "AXValue")?.encode_utf16().count() as isize)
+	}
+
+	fn select(&self, length: isize) -> AXError {
+		let mut all = CFRange { location: 0, length };
+		// SAFETY: `all` is a live CFRange matching the requested AXValue type.
+		let Some(range) =
+			(unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut all).cast()) })
+		else {
+			return AXError::Failure;
+		};
+		let attribute = CFString::from_str("AXSelectedTextRange");
+		// SAFETY: The element, attribute and range remain retained for the
+		// setter.
+		unsafe { self.element.set_attribute_value(&attribute, &range) }
+	}
+
+	fn insert(&self, text: &str) -> CoreResult<()> {
+		set_string_value(self.element, "AXSelectedText", text)?;
+		verify_text_value(self.element, text, text)
+	}
+}
+
+/// Focus moves only inside a background app: in the front app it would move
+/// the user's caret, and an unknown front process counts as the target's.
+fn may_borrow_focus(front: Option<libc::pid_t>, target: libc::pid_t) -> bool {
+	front.is_some_and(|front| front != target)
+}
+
+fn focus_element(element: &AXUIElement) -> AXError {
+	let attribute = CFString::from_str("AXFocused");
+	// SAFETY: The singleton CFBoolean and retained element remain valid for the
+	// synchronous setter call.
+	unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) }
 }
 
 /// AX text ranges use UTF-16 offsets, not UTF-8 byte or Unicode scalar indices.
@@ -988,6 +1281,28 @@ fn replace_utf16_selection(
 	result.push_str(text);
 	result.push_str(&before[end_byte..]);
 	Some(result)
+}
+
+/// In a Mac Catalyst (`UIKit`) app, pressing a row scrolled out of its view
+/// reports success and does nothing. Scrolling it into view first lets the
+/// press land; for an element already in view the scroll changes nothing.
+fn scrolls_before_press(native: &str, actions: &[String], uikit: impl FnOnce() -> bool) -> bool {
+	native == "AXPress" && actions.iter().any(|action| action == SCROLL_TO_VISIBLE) && uikit()
+}
+
+/// Sends `native`, after [`SCROLL_TO_VISIBLE`] when `scroll_first`. A failed
+/// scroll leaves the action to report its own outcome; a run cancelled during
+/// the scroll sends nothing more.
+fn press_into_view(
+	native: &str,
+	scroll_first: bool,
+	mut send: impl FnMut(&str) -> AXError,
+) -> CoreResult<()> {
+	if scroll_first {
+		let _ = send(SCROLL_TO_VISIBLE);
+		control::check()?;
+	}
+	element_action_result(native, send(native))
 }
 
 fn perform_action(element: &AXUIElement, action: &str) -> CoreResult<()> {
@@ -1036,36 +1351,6 @@ fn create_application(pid: libc::pid_t) -> CoreResult<CFRetained<AXUIElement>> {
 	// SAFETY: Create-rule ownership transfers the +1 AXUIElement reference into
 	// CFRetained.
 	Ok(unsafe { CFRetained::from_raw(pointer) })
-}
-
-/// Chromium-family apps build their renderer accessibility tree lazily. Reading
-/// the application role activates modern Chrome's native AX mode, while older
-/// Chromium/Electron builds also honor `AXManualAccessibility`. A process that
-/// rejects the manual setter incurs no readiness delay.
-fn enable_web_accessibility(pid: libc::pid_t, app: &AXUIElement) {
-	// Modern Chromium treats an assistive client's role query as the activation
-	// signal. Older Chromium/Electron builds use the manual setter below.
-	let _ = copy_string(app, "AXRole");
-	{
-		let mut enabled = MANUAL_ACCESSIBILITY
-			.lock()
-			.unwrap_or_else(|error| error.into_inner());
-		if !enabled.insert(pid) {
-			return;
-		}
-		let attribute = CFString::from_str("AXManualAccessibility");
-		// SAFETY: The retained element, attribute, and singleton CFBoolean remain
-		// valid for the synchronous setter call.
-		let error = unsafe { app.set_attribute_value(&attribute, CFBoolean::new(true)) };
-		if error != AXError::Success {
-			// Manual activation is unsupported; leave no stale pid marker.
-			enabled.remove(&pid);
-			return;
-		}
-	}
-	// The renderers publish their trees over IPC after the switch flips, so the
-	// first snapshot would otherwise race a still-empty web area.
-	thread::sleep(Duration::from_millis(500));
 }
 
 fn create_system_wide() -> CFRetained<AXUIElement> {
@@ -1374,17 +1659,21 @@ fn element_gone() -> DesktopError {
 
 #[cfg(test)]
 mod tests {
-	use std::ptr::NonNull;
+	use std::{
+		cell::{Cell, RefCell},
+		ptr::NonNull,
+	};
 
 	use objc2_application_services::{AXError, AXValue, AXValueType};
 	use objc2_core_foundation::{CFArray, CFNumber, CFString, CFType, Type, kCFNull};
 
 	use super::{
-		AttachedCandidate, CHILDREN, DESCRIPTION, ENABLED, NodeRead, NodeValues, ROLE, TITLE, VALUE,
-		ax_result, element_action_result, replace_utf16_selection, required_string, select_attached,
-		stringify_value,
+		AttachedCandidate, CHILDREN, DESCRIPTION, ENABLED, NodeRead, NodeValues, ROLE, TITLE,
+		TextField, VALUE, ax_result, element_action_result, may_borrow_focus,
+		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
+		select_attached, stringify_value, text_readback,
 	};
-	use crate::desktop::error::ErrorCode;
+	use crate::desktop::error::{CoreResult, ErrorCode};
 
 	#[test]
 	fn batched_values_read_like_lone_reads() {
@@ -1493,6 +1782,243 @@ mod tests {
 	}
 
 	#[test]
+	fn rewritten_readback_fails_and_names_what_the_field_reads() {
+		let error =
+			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(error.message.contains(r#""555-789-0123""#), "{}", error.message);
+		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
+		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
+	}
+
+	#[test]
+	fn inserted_readback_names_the_whole_value_it_expected() {
+		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		for quoted in [r#""b""#, r#""ac""#, r#""abc""#] {
+			assert!(error.message.contains(quoted), "{quoted}: {}", error.message);
+		}
+		let unread = text_readback("b", "abc", None, false).unwrap_err();
+		assert_eq!(unread.code, ErrorCode::AxFailed);
+		assert!(unread.message.contains(r#""b""#), "{}", unread.message);
+	}
+
+	#[test]
+	fn long_readbacks_are_cut() {
+		let long = "x".repeat(500);
+		let error = text_readback("y", "y", Some(&long), false).unwrap_err();
+		assert!(error.message.len() < 400, "{}", error.message.len());
+		assert!(error.message.contains('…'), "{}", error.message);
+	}
+
+	#[test]
+	fn secure_readbacks_never_quote_the_text() {
+		for actual in [None, Some("••••"), Some("")] {
+			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter2"), "{}", error.message);
+			assert!(error.message.contains("secure"), "{}", error.message);
+		}
+		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
+	}
+
+	#[test]
+	fn an_unreadable_or_malformed_subrole_counts_as_secure() {
+		use super::Subrole;
+
+		assert!(secure_subrole(Ok(Subrole::Named("AXSecureTextField".to_owned()))));
+		assert!(!secure_subrole(Ok(Subrole::Named("AXSearchField".to_owned()))));
+		assert!(secure_subrole(Ok(Subrole::Malformed)));
+		assert!(!secure_subrole(Ok(Subrole::Absent)));
+		assert!(!secure_subrole(Err(AXError::NoValue)));
+		assert!(!secure_subrole(Err(AXError::AttributeUnsupported)));
+		assert!(secure_subrole(Err(AXError::CannotComplete)));
+	}
+
+	#[test]
+	fn focus_is_borrowed_only_from_a_known_background_app() {
+		assert!(may_borrow_focus(Some(10), 20));
+		assert!(!may_borrow_focus(Some(20), 20));
+		assert!(!may_borrow_focus(None, 20));
+	}
+
+	/// A background field whose user, while the selection probes block, brings
+	/// its app forward and, with `takes_focus`, clicks another control in it.
+	struct ScriptedField {
+		focused:            Cell<bool>,
+		switches:           bool,
+		switches_on_select: bool,
+		takes_focus:        bool,
+		switched:           Cell<bool>,
+		/// What the focus and selection setters answer after applying.
+		focus_reply:        AXError,
+		select_reply:       AXError,
+		calls:              RefCell<Vec<&'static str>>,
+		/// Cancelled while the selection write blocks, as a run stopped then
+		/// would be.
+		cancel_on_select:   Option<crate::desktop::control::CancellationSource>,
+	}
+
+	impl ScriptedField {
+		fn new(switches: bool, takes_focus: bool) -> Self {
+			Self {
+				focused: Cell::new(false),
+				switches,
+				switches_on_select: false,
+				takes_focus,
+				switched: Cell::new(false),
+				focus_reply: AXError::Success,
+				select_reply: AXError::Success,
+				calls: RefCell::default(),
+				cancel_on_select: None,
+			}
+		}
+
+		fn calls(&self) -> Vec<&'static str> {
+			self.calls.borrow().clone()
+		}
+	}
+
+	impl TextField for ScriptedField {
+		type Element = ();
+
+		fn focused(&self) -> Option<bool> {
+			Some(self.focused.get())
+		}
+
+		fn focus_owner(&self) -> Option<()> {
+			Some(())
+		}
+
+		fn in_background(&self) -> bool {
+			!self.switched.get()
+		}
+
+		fn brought_forward(&self) -> bool {
+			self.switched.get()
+		}
+
+		fn focus(&self) -> AXError {
+			self.calls.borrow_mut().push("focus");
+			self.focused.set(true);
+			self.focus_reply
+		}
+
+		fn hand_focus_to(&self, (): &()) -> AXError {
+			self.calls.borrow_mut().push("hand back");
+			self.focused.set(false);
+			AXError::Success
+		}
+
+		fn selectable_length(&self) -> Option<isize> {
+			if self.switches {
+				self.switched.set(true);
+				if self.takes_focus {
+					self.focused.set(false);
+				}
+			}
+			Some(3)
+		}
+
+		fn select(&self, _: isize) -> AXError {
+			self.calls.borrow_mut().push("select");
+			if self.switches_on_select {
+				self.switched.set(true);
+			}
+			if let Some(source) = &self.cancel_on_select {
+				source.cancel();
+			}
+			self.select_reply
+		}
+
+		fn insert(&self, _: &str) -> CoreResult<()> {
+			self.calls.borrow_mut().push("insert");
+			Ok(())
+		}
+	}
+
+	#[test]
+	fn a_background_field_is_focused_selected_and_replaced() {
+		let field = ScriptedField::new(false, false);
+		assert!(replace_whole_value(&field, "abc").unwrap());
+		assert_eq!(field.calls(), ["focus", "select", "insert"]);
+	}
+
+	#[test]
+	fn a_focused_field_whose_app_comes_forward_during_the_probes_is_not_typed_over() {
+		let field = ScriptedField { focused: Cell::new(true), ..ScriptedField::new(true, false) };
+		assert!(!replace_whole_value(&field, "abc").unwrap());
+		assert!(field.calls().is_empty(), "{:?}", field.calls());
+	}
+
+	#[test]
+	fn bringing_the_app_forward_during_the_probes_leaves_its_selection_alone() {
+		let field = ScriptedField::new(true, false);
+		assert!(!replace_whole_value(&field, "abc").unwrap());
+		assert_eq!(field.calls(), ["focus", "hand back"]);
+	}
+
+	#[test]
+	fn focus_the_user_moved_during_the_probes_is_not_taken_back() {
+		let field = ScriptedField::new(true, true);
+		assert!(!replace_whole_value(&field, "abc").unwrap());
+		assert_eq!(field.calls(), ["focus"]);
+	}
+
+	#[test]
+	fn bringing_the_app_forward_during_the_selection_write_is_not_typed_over() {
+		let field = ScriptedField { switches_on_select: true, ..ScriptedField::new(false, false) };
+		assert!(!replace_whole_value(&field, "abc").unwrap());
+		assert_eq!(field.calls(), ["focus", "select", "hand back"]);
+	}
+
+	#[test]
+	fn an_unanswered_focus_that_applied_is_handed_back_and_nothing_is_written() {
+		let field =
+			ScriptedField { focus_reply: AXError::CannotComplete, ..ScriptedField::new(false, false) };
+		let error = replace_whole_value(&field, "abc").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert_eq!(field.calls(), ["focus", "hand back"]);
+		assert!(!field.focused.get());
+	}
+
+	#[test]
+	fn an_unanswered_selection_hands_focus_back_and_skips_the_value_write() {
+		let field = ScriptedField {
+			select_reply: AXError::CannotComplete,
+			..ScriptedField::new(false, false)
+		};
+		let error = replace_whole_value(&field, "abc").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert_eq!(field.calls(), ["focus", "select", "hand back"]);
+	}
+
+	#[test]
+	fn a_run_cancelled_during_the_selection_write_hands_focus_back_and_writes_nothing() {
+		use crate::desktop::control::{self, CancellationSource};
+
+		let source = CancellationSource::default();
+		let field = ScriptedField {
+			cancel_on_select: Some(source.clone()),
+			..ScriptedField::new(false, false)
+		};
+		let result =
+			control::with_token_for_test(&source.token(), || replace_whole_value(&field, "abc"));
+		assert_eq!(result.map_err(|error| error.code), Err(ErrorCode::Cancelled));
+		assert_eq!(field.calls(), ["focus", "select", "hand back"]);
+	}
+
+	#[test]
+	fn a_refused_selection_still_falls_back_to_the_value_write() {
+		let field = ScriptedField {
+			select_reply: AXError::AttributeUnsupported,
+			..ScriptedField::new(false, false)
+		};
+		assert!(!replace_whole_value(&field, "abc").unwrap());
+		assert_eq!(field.calls(), ["focus", "select", "hand back"]);
+	}
+
+	#[test]
 	fn sheet_or_popover_window_id_beats_a_menu_at_the_same_frame() {
 		let candidates =
 			[AttachedCandidate::Menu { frame_matches: true }, AttachedCandidate::OwnWindow(Some(51))];
@@ -1521,5 +2047,61 @@ mod tests {
 			frame_matches: true,
 		}];
 		assert!(select_attached(&candidates, 57).is_err());
+	}
+
+	#[test]
+	fn only_a_uikit_press_scrolls_its_element_into_view_first() {
+		use super::scrolls_before_press;
+
+		let actions = |names: &[&str]| {
+			names
+				.iter()
+				.map(|name| (*name).to_owned())
+				.collect::<Vec<_>>()
+		};
+		let row = actions(&["AXPress", "AXScrollToVisible", "AXShowMenu"]);
+		assert!(scrolls_before_press("AXPress", &row, || true));
+		// An AppKit app, another action, or an element that cannot scroll: press
+		// as is.
+		assert!(!scrolls_before_press("AXPress", &row, || false));
+		assert!(!scrolls_before_press("AXShowMenu", &row, || true));
+		assert!(!scrolls_before_press("AXPress", &actions(&["AXPress"]), || true));
+		// The app is only classified when the press could scroll.
+		assert!(!scrolls_before_press("AXShowMenu", &row, || unreachable!()));
+	}
+
+	#[test]
+	fn a_press_follows_its_scroll_unless_the_run_was_cancelled() {
+		use super::{SCROLL_TO_VISIBLE, press_into_view};
+		use crate::desktop::control;
+
+		let run = |scroll_first: bool, scroll_result: AXError, cancel: bool| {
+			let source = control::CancellationSource::default();
+			let token = source.token();
+			let mut sent = Vec::new();
+			let result = control::with_token_for_test(&token, || {
+				press_into_view("AXPress", scroll_first, |action| {
+					sent.push(action.to_owned());
+					if action != SCROLL_TO_VISIBLE {
+						return AXError::Success;
+					}
+					if cancel {
+						source.cancel();
+					}
+					scroll_result
+				})
+			});
+			(result.map_err(|error| error.code), sent)
+		};
+		let both = vec![SCROLL_TO_VISIBLE.to_owned(), "AXPress".to_owned()];
+		assert_eq!(run(true, AXError::Success, false), (Ok(()), both.clone()));
+		// A failed scroll still presses.
+		assert_eq!(run(true, AXError::Failure, false), (Ok(()), both));
+		assert_eq!(run(false, AXError::Success, false), (Ok(()), vec!["AXPress".to_owned()]));
+		// Cancelled while scrolling: the press is never sent.
+		assert_eq!(
+			run(true, AXError::Success, true),
+			(Err(ErrorCode::Cancelled), vec![SCROLL_TO_VISIBLE.to_owned()])
+		);
 	}
 }

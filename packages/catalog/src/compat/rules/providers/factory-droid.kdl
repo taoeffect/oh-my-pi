@@ -691,6 +691,12 @@ provider "factory-droid" {
 		thinking-requires-effort #true
 		thinking-default-level "medium"
 	}
+	// The native 922K window is authoritative; the class-wide gpt-5.4 1M patch does not apply.
+	class "openai" {
+		models "gpt-5.4" {
+			limits-patch {}
+		}
+	}
 	models "gpt-5.4-fast" {
 		routing-family "openai"
 		upstream-rotation "openai" "azure_openai"

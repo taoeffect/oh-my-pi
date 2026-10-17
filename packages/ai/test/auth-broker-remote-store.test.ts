@@ -556,6 +556,31 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			},
 		);
 	});
+
+	test("evicts cold sticky sessions while preserving recently accessed sessions", () => {
+		remote = new RemoteAuthCredentialStore({ client: new AuthBrokerClient({ url: handle!.url, token }) });
+		const expires = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
+		for (let i = 0; i < 4096; i++) remote.setCache(`session:sticky:mock:${i}`, "credential-1", expires);
+		expect(remote.getCache("session:sticky:mock:0")).toBe("credential-1");
+		for (let i = 4096; i < 5000; i++) remote.setCache(`session:sticky:mock:${i}`, "credential-1", expires);
+		expect(remote.getCache("session:sticky:mock:0")).toBe("credential-1");
+		expect(remote.getCache("session:sticky:mock:1")).toBeNull();
+		expect(remote.getCache("session:sticky:mock:4999")).toBe("credential-1");
+	});
+
+	test("bounds cached request data even when one session key or value is large", () => {
+		remote = new RemoteAuthCredentialStore({ client: new AuthBrokerClient({ url: handle!.url, token }) });
+		const expires = Math.floor(Date.now() / 1000) + 60;
+		const payload = "x".repeat(2 * 1024 * 1024);
+		remote.setCache("first", payload, expires);
+		remote.setCache("second", payload, expires);
+		remote.setCache("third", payload, expires);
+		expect(remote.getCache("first")).toBeNull();
+		expect(remote.getCache("third")).toBe(payload);
+		remote.setCache("oversized", payload + payload + "!", expires);
+		expect(remote.getCache("oversized")).toBeNull();
+		expect(remote.getCache("third")).toBe(payload);
+	});
 });
 
 /**

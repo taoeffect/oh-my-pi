@@ -3,6 +3,9 @@ import type { NativeChild, NativeNode } from "../src/native/node";
 import { editToolRenderer } from "../src/tools/edit";
 import { grepToolRenderer } from "../src/tools/grep";
 import { readToolRenderer } from "../src/tools/read";
+import { writeToolRenderer } from "../src/tools/write";
+import { describeCodeCell } from "../src/render/code-cell";
+import { theme } from "../src/theme/theme";
 import { getNativeBlob } from "../src/native/blobs";
 import type { RenderResultOptions } from "../src/tools/renderer";
 
@@ -82,5 +85,20 @@ describe("core tool native views", () => {
 		expect(blocks.map(b => b.start)).toEqual([9, 40]);
 		expect(blocks[0]!.text).toBe("ctx\nhit here\nafter");
 		expect(blocks.flatMap(b => (b.marks ?? []).map(m => m.line))).toEqual([10, 40]);
+	});
+
+	it("wraps long lines of read, write, and code-cell source as their ANSI renderers do (#15823)", () => {
+		const long = `const x = "${"y".repeat(300)}";`;
+		const read = readToolRenderer.describeResult({ content: [{ type: "text", text: long }] }, done, { path: "a.ts" });
+		const write = writeToolRenderer.describeResult?.({ content: [{ type: "text", text: "ok" }] }, done, {
+			path: "a.ts",
+			content: long,
+		});
+		const cell = describeCodeCell({ code: long, language: "ts", codeStartLine: 1 }, theme);
+		for (const children of [read.body, write?.body, [cell]]) {
+			const blocks = collect(children, "code");
+			expect(blocks).toHaveLength(1);
+			expect(blocks[0]!.p).toMatchObject({ text: long, wrap: true });
+		}
 	});
 });

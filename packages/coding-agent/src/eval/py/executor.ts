@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 import { getProjectDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -17,6 +18,7 @@ import {
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
 import { getEnabledEvalPreludes } from "../preludes";
+import { updateEvalState } from "../state";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import {
 	createKernelSessionRegistry,
@@ -184,6 +186,34 @@ interface SessionKernelReplacement {
 interface PythonSession extends KernelSession<PythonKernel> {
 	generation: number;
 	replacement?: SessionKernelReplacement;
+	/** Tool sessions told this session's kernels are alive; each kernel death is reported to all of them. */
+	stateSessions: Set<ToolSession>;
+	/** Kernel whose death is already wired to `stateSessions`. */
+	watchedKernel?: PythonKernel;
+}
+
+/**
+ * Reports a retained kernel as alive in the eval state registry, so the
+ * host-registry reminder lists it, and reports its death once it exits or
+ * shuts down (crash, timeout kill, reset, or owner disposal).
+ */
+function reportKernelAlive(session: PythonSession, kernel: PythonKernel, toolSession: ToolSession | undefined): void {
+	if (!toolSession) return;
+	session.stateSessions.add(toolSession);
+	if (session.watchedKernel !== kernel) {
+		session.watchedKernel = kernel;
+		void kernel.whenDead().then(() => {
+			for (const stateSession of session.stateSessions) {
+				updateEvalState(stateSession, { language: "python", kernelId: kernel.id, alive: false });
+			}
+		});
+	}
+	updateEvalState(toolSession, {
+		language: "python",
+		kernelId: kernel.id,
+		alive: true,
+		interpreter: kernel.pythonPath,
+	});
 }
 
 function normalizeExplicitInterpreter(cwd: string, interpreter: string | undefined): string {
@@ -330,7 +360,10 @@ async function acquireLiveSessionKernel(
 ): Promise<PythonKernel> {
 	while (context.sessions.get(session.sessionKey) === session) {
 		const kernel = session.kernel;
-		if (kernel.isAlive()) return kernel;
+		if (kernel.isAlive()) {
+			reportKernelAlive(session, kernel, options.toolSession);
+			return kernel;
+		}
 		await context.replaceSessionKernel(session, cwd, options);
 	}
 	throw new PythonExecutionCancelledError(false);
@@ -414,9 +447,28 @@ const sessionRegistry = createKernelSessionRegistry<PythonKernel, PythonExecutor
 		const normalizedCwd = normalizeKernelSessionCwd(cwd);
 		return `${sessionId}\0${normalizedCwd}\0${normalizeExplicitInterpreter(normalizedCwd, interpreter)}`;
 	},
-	createSession: session => ({ ...session, generation: 0 }),
+	createSession: session => ({ ...session, generation: 0, stateSessions: new Set() }),
 	startKernel,
-	executeWithKernel,
+	executeWithKernel: async (kernel, code, options) => {
+		const result = await executeWithKernel(kernel, code, options);
+		// A file-backed cell that completed in a retained kernel loaded that script's definitions.
+		if (
+			options.toolSession &&
+			options.filename &&
+			path.isAbsolute(options.filename) &&
+			result.exitCode === 0 &&
+			kernel.isAlive()
+		) {
+			updateEvalState(options.toolSession, {
+				language: "python",
+				kernelId: kernel.id,
+				alive: true,
+				interpreter: kernel.pythonPath,
+				loadedPath: options.filename,
+			});
+		}
+		return result;
+	},
 	replaceSessionKernel,
 	acquireLiveSessionKernel,
 	invalidateSession: session => {

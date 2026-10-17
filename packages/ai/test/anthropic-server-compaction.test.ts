@@ -7,6 +7,7 @@ import {
 import type { AssistantMessage, Context, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const spec: ModelSpec<"anthropic-messages"> = {
 	id: "claude-fable-5",
@@ -82,7 +83,7 @@ async function captureRequest(
 	const fetchMock: typeof fetch = Object.assign(
 		async (_input: string | URL | Request, init?: RequestInit) => {
 			beta = new Headers(init?.headers).get("anthropic-beta") ?? "";
-			const body: unknown = JSON.parse(String(init?.body ?? "{}"));
+			const body: unknown = JSON.parse(requestBodyText(init) ?? "{}");
 			payload = body !== null && typeof body === "object" ? { ...body } : {};
 			return new Response(
 				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),

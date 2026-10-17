@@ -1,11 +1,13 @@
-import { describe, expect, it, vi } from "bun:test";
+import { beforeAll, describe, expect, it, vi } from "bun:test";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import {
 	type JobsPanelDetail,
 	type JobsPanelJob,
+	type JobsPanelSnapshot,
 	JobsSheet,
 	type JobsSheetSource,
 } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -67,16 +69,10 @@ function setup(jobs: { running: JobsPanelJob[]; recent: JobsPanelJob[] } = JOBS)
 }
 
 describe("JobsSheet", () => {
-	it("lists running then recent jobs beside the first job's detail", () => {
+	it("lists running then settled jobs, oldest first, beside the first job's detail", () => {
 		const { sheet } = setup();
 		const root = sheet.describe(CX);
-		expect(list(root)?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual([
-			"group-Running",
-			"task-1",
-			"bash-1",
-			"group-Recent",
-			"bash-2",
-		]);
+		expect(list(root)?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual(["task-1", "bash-1", "bash-2"]);
 		expect(prop(list(root), "selected")).toBe("task-1");
 		const detail = byRole(root, "omp.jobs.detail")[0]!;
 		expect(texts(detail)).toContain("Audit credits");
@@ -153,5 +149,95 @@ describe("JobsSheet", () => {
 		expect(lines).toContain("> running  bash");
 		expect(lines).toContain("pid 41");
 		expect(lines).toContain("running 12 tests");
+	});
+
+	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {
+		// A focused subagent view only watches that agent's jobs (#14814).
+		const source: JobsSheetSource = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
+		const sheet = new JobsSheet(source);
+		expect(byRole(sheet.describe(CX), "omp.btn").map(btn => btn.key)).toEqual(["close"]);
+
+		sheet.handleInput(DOWN);
+		const lines = sheet.render(100).join("\n");
+		expect(lines).toContain("cargo test --workspace");
+		expect(lines).toContain("pid 41");
+	});
+
+	describe("as a tree of subagents", () => {
+		beforeAll(async () => {
+			await initTheme();
+		});
+		const job = (id: string, ownerId: string, extra: Partial<JobsPanelJob> = {}): JobsPanelJob => ({
+			id,
+			type: "bash",
+			status: "running",
+			label: id,
+			ownerId,
+			startTime: NOW - 1_000,
+			...extra,
+		});
+		// Main runs Audit (which runs Sub) and owns two leaf jobs; Lone's task job is gone.
+		const TREE = {
+			rootId: "Main",
+			agents: [
+				{ id: "Audit", parentId: "Main" },
+				{ id: "Sub", parentId: "Audit" },
+				{ id: "Lone", parentId: "Main" },
+			],
+			running: [
+				job("main-bash", "Main", { startTime: NOW - 9_000 }),
+				job("task-audit", "Main", { type: "task", agentId: "Audit" }),
+				job("audit-bash", "Audit", { startTime: NOW - 8_000 }),
+				job("task-sub", "Audit", { type: "task", agentId: "Sub" }),
+				job("sub-bash", "Sub"),
+				job("lone-bash", "Lone"),
+			],
+			recent: [job("main-done", "Main", { status: "completed", endTime: NOW })],
+		} satisfies JobsPanelSnapshot;
+		const treeSheet = () => {
+			const source = { load: () => TREE, inspect: () => undefined, cancel: vi.fn(), close: vi.fn() };
+			return { sheet: new JobsSheet(source satisfies JobsSheetSource), source };
+		};
+
+		it("nests each subagent's jobs under it, branchiest subtrees first and leaf jobs last", () => {
+			const { sheet } = treeSheet();
+			expect(list(sheet.describe(CX))?.c?.map(row => ("key" in row ? row.key : undefined))).toEqual([
+				"task-audit",
+				"task-sub",
+				"sub-bash",
+				"audit-bash",
+				expect.stringMatching(/^agent-/),
+				"lone-bash",
+				"main-bash",
+				"main-done",
+			]);
+			const rows = sheet
+				.render(120)
+				.slice(1, 9)
+				.map(line => line.trimEnd());
+			expect(rows).toEqual([
+				expect.stringMatching(/^> running {2}task \S+ {2}Audit: task-audit$/),
+				expect.stringMatching(/^ {2}├─ running {2}task \S+ {2}Sub: task-sub$/),
+				expect.stringMatching(/^ {2}│ {2}└─ running {2}bash \S+ {2}sub-bash$/),
+				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}audit-bash$/),
+				"  Lone",
+				expect.stringMatching(/^ {2}└─ running {2}bash \S+ {2}lone-bash$/),
+				expect.stringMatching(/^ {2}running {2}bash \S+ {2}main-bash$/),
+				expect.stringMatching(/^ {2}completed {2}bash \S+ {2}main-done$/),
+			]);
+		});
+
+		it("cancels only jobs the root owns", () => {
+			const { sheet, source } = treeSheet();
+			sheet.handleInput(DOWN); // task-sub, owned by Audit
+			expect(byRole(sheet.describe(CX), "omp.btn").map(btn => btn.key)).toEqual(["close"]);
+			sheet.handleInput("x");
+			sheet.handleNativeEvent({ type: "action", key: "cancel", act: "cancel", mods: [] });
+			expect(source.cancel).not.toHaveBeenCalled();
+
+			sheet.handleInput(UP); // task-audit, owned by Main
+			sheet.handleInput("x");
+			expect(source.cancel).toHaveBeenCalledWith("task-audit");
+		});
 	});
 });

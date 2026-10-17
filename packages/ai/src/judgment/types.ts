@@ -11,7 +11,7 @@
  * bridge ({@link TextJudge}) renders the same questions into keyword prompts
  * for an ordinary chat model.
  */
-import type { Usage } from "../types";
+import type { ImageContent, Usage } from "../types";
 
 /** JSON-compatible value; readonly containers are accepted so `as const` state passes through. */
 export type JsonValue = string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };
@@ -80,6 +80,8 @@ export type AnswerFor<Q extends Question> =
 export interface JudgmentRequest<Q extends Questions = Questions> {
 	state: JudgmentState;
 	questions: Q;
+	/** Images evaluated alongside the state; never part of the JSON state itself. */
+	images?: readonly ImageContent[];
 }
 
 export interface JudgmentResult<Q extends Questions = Questions> {
@@ -97,6 +99,8 @@ export interface JudgeOptions {
 
 /** Answers typed questions about a state. Implementations are stateless and safe to share. */
 export interface Judge {
+	/** Whether this backend can consume separate image content blocks. */
+	readonly supportsImages?: boolean;
 	/** Backend description for logs, e.g. `typesafe/jev-latest`. */
 	readonly label: string;
 	judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>>;

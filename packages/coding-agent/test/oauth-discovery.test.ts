@@ -22,22 +22,111 @@ describe("mcp oauth discovery", () => {
 		expect(auth.authServerUrl).toBe("https://www.figma.com/");
 	});
 
-	it("discovers oauth endpoints from auth server metadata", async () => {
+	it.each(["standard", "nested"])(
+		"retains scopes from protected-resource metadata with %s inline endpoints",
+		async format => {
+			const fetchImpl = mockFetch((input: FetchInput) => {
+				if (String(input) !== "https://mcp.example.com/.well-known/oauth-protected-resource/mcp") {
+					return new Response("not found", { status: 404 });
+				}
+				const endpoints =
+					format === "standard"
+						? {
+								authorization_endpoint: "https://auth.example.com/authorize",
+								token_endpoint: "https://auth.example.com/token",
+							}
+						: {
+								oauth: {
+									authorization_url: "https://auth.example.com/authorize",
+									token_url: "https://auth.example.com/token",
+								},
+							};
+				return Response.json({
+					resource: "https://mcp.example.com/mcp",
+					scopes_supported: ["mcp.read"],
+					...endpoints,
+				});
+			});
+
+			const oauth = await discoverOAuthEndpoints("https://mcp.example.com/mcp", undefined, undefined, {
+				fetch: fetchImpl,
+			});
+
+			expect(oauth?.scopes).toBe("mcp.read");
+		},
+	);
+
+	it.each([
+		["/oauth/metadata", "standard"],
+		["/oauth/metadata", "oauth"],
+		["/oauth/metadata", "authorization"],
+		["/oauth/metadata", "auth"],
+		["/.mcp/auth", "standard"],
+		["/.mcp/auth", "oauth"],
+		["/.mcp/auth", "authorization"],
+		["/.mcp/auth", "auth"],
+	] as const)("keeps resource scopes but not issuer catalogues at %s (%s)", async (metadataPath, format) => {
+		const authorizationUrl = "https://issuer.example.com/authorize";
+		const tokenUrl = "https://issuer.example.com/token";
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) !== `https://legacy.example.com${metadataPath}`) {
+				return new Response("not found", { status: 404 });
+			}
+			return Response.json(
+				format === "standard"
+					? {
+							authorization_endpoint: authorizationUrl,
+							token_endpoint: tokenUrl,
+							scopes_supported: ["mcp.read"],
+						}
+					: {
+							[format]: {
+								authorization_url: authorizationUrl,
+								token_url: tokenUrl,
+								scopes_supported: ["mcp.read"],
+							},
+						},
+			);
+		});
+
+		const resource = await discoverOAuthEndpoints("https://legacy.example.com/mcp", undefined, undefined, {
+			fetch: fetchImpl,
+		});
+		expect(resource?.scopes).toBe("mcp.read");
+
+		const issuer = await discoverOAuthEndpoints(
+			"https://other-resource.example.com/mcp",
+			"https://legacy.example.com",
+			undefined,
+			{ fetch: fetchImpl },
+		);
+		expect(issuer).toMatchObject({ authorizationUrl, tokenUrl, scopes: undefined });
+	});
+
+	it.each(["standard", "nested"])("does not request the %s authorization server's scope catalogue", async format => {
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {
 			const url = String(input);
 			calls.push(url);
 
 			if (url === "https://www.figma.com/.well-known/oauth-authorization-server") {
-				return new Response(
-					JSON.stringify({
-						authorization_endpoint: "https://www.figma.com/oauth",
-						token_endpoint: "https://api.figma.com/v1/oauth/token",
-						client_id: "figma-client-id",
-						scopes_supported: ["file_read", "file_write"],
-					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				);
+				const metadata =
+					format === "standard"
+						? {
+								authorization_endpoint: "https://www.figma.com/oauth",
+								token_endpoint: "https://api.figma.com/v1/oauth/token",
+								client_id: "figma-client-id",
+								scopes_supported: ["file_read", "file_write"],
+							}
+						: {
+								oauth: {
+									authorization_url: "https://www.figma.com/oauth",
+									token_url: "https://api.figma.com/v1/oauth/token",
+									client_id: "figma-client-id",
+									scopes_supported: ["file_read", "file_write"],
+								},
+							};
+				return Response.json(metadata);
 			}
 
 			return new Response("not found", { status: 404 });
@@ -51,7 +140,7 @@ describe("mcp oauth discovery", () => {
 			authorizationUrl: "https://www.figma.com/oauth",
 			tokenUrl: "https://api.figma.com/v1/oauth/token",
 			clientId: "figma-client-id",
-			scopes: "file_read file_write",
+			scopes: undefined,
 		});
 		expect(calls[0]).toBe("https://www.figma.com/.well-known/oauth-authorization-server");
 	});

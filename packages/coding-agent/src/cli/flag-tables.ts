@@ -397,11 +397,11 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 
 /**
  * Rewrite the launch argv for a relaunch of this session (`/restart`, and
- * `/fork pane|window` with `resumeSessionId` undefined).
+ * `/fork pane|window` with `resumeSessionSource` undefined).
  *
  * Keeps every configuration flag as launched, but drops:
  * - one-shot selectors ({@link ONE_SHOT_LAUNCH_FLAGS}, including inline
- *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ *   `--resume=<source>` forms) - the relaunch resumes `resumeSessionSource` instead;
  * - flags in `drop`, which the caller re-supplies with current values;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
@@ -409,12 +409,12 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
  *
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
- * `resumeSessionId` is omitted for a session that never materialized on disk;
- * the relaunch then starts fresh with the same configuration.
+ * `resumeSessionSource` is a session ID or file path, omitted for a session that
+ * never materialized on disk; the relaunch then starts fresh with the same configuration.
  */
 export function restartArgv(
 	argv: string[],
-	resumeSessionId: string | undefined,
+	resumeSessionSource: string | undefined,
 	drop?: Readonly<Record<string, true>>,
 ): string[] {
 	const kept: string[] = [];
@@ -431,6 +431,6 @@ export function restartArgv(
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
+	if (resumeSessionSource !== undefined) kept.push("--resume", resumeSessionSource);
 	return kept;
 }

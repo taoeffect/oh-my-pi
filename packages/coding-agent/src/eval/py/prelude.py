@@ -162,7 +162,15 @@ if "__omp_prelude_loaded__" not in globals():
             p = _artifact_file(path)
             if p is None:
                 # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-                return _read_through_tool(f"{path}:raw", offset, limit)
+                # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
+                located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
+                details = located.get("details") if isinstance(located, dict) else None
+                file_path = details.get("resolvedPath") if isinstance(details, dict) else None
+                if not isinstance(file_path, str):
+                    # An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
+                    return _read_through_tool(f"{path}:raw", offset, limit)
+                # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
+                p = Path(file_path)
         elif _should_delegate_read(path):
             return _read_through_tool(path, offset, limit)
         else:
@@ -888,12 +896,17 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(questions, dict):
             raise TypeError("judge(state, questions) expects questions as a dict keyed by id")
 
-    async def judge(state, questions):
-        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score)."""
+    async def judge(state, questions, *, images=None):
+        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score).
+
+        ``images`` is a list of local-path strings or embedded
+        ``{"type": "image", "data": ..., "mimeType": ...}`` attachments.
+        """
         _check_questions(questions)
-        result = await asyncio.to_thread(
-            _bridge_call, "__judge__", {"state": state, "questions": questions}
-        )
+        args = {"state": state, "questions": questions}
+        if images is not None:
+            args["images"] = images
+        result = await asyncio.to_thread(_bridge_call, "__judge__", args)
         if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
             raise RuntimeError("judge() did not return answers")
         return result["answers"]
@@ -990,6 +1003,7 @@ if "__omp_prelude_loaded__" not in globals():
         states,
         questions,
         *,
+        images=None,
         concurrency=None,
         retries=None,
         min_ok=None,
@@ -1000,6 +1014,9 @@ if "__omp_prelude_loaded__" not in globals():
         ``states`` is ``{key: state}`` or a list (keys are indices). ``intent`` is an
         optional nonempty progress/job label. Item failures land in ``JudgmentItem.error``;
         only a run that dies wholesale raises from ``drain()``.
+
+        ``images`` optionally maps state keys to lists of local-path strings or embedded
+        ``{"type": "image", "data": ..., "mimeType": ...}`` attachments.
         """
         _check_questions(questions)
         if intent is not None and (
@@ -1012,6 +1029,16 @@ if "__omp_prelude_loaded__" not in globals():
             items = [{"key": index, "state": state} for index, state in enumerate(states)]
         else:
             raise TypeError("judge_batch(states, questions) expects states as a dict or list")
+        if images is not None:
+            if not isinstance(images, dict):
+                raise TypeError("judge_batch() images must be a dict keyed by input key")
+            item_keys = {item["key"] for item in items}
+            for key in images:
+                if key not in item_keys:
+                    raise ValueError(f"images contains unknown input key {json.dumps(key)}")
+            for item in items:
+                if item["key"] in images:
+                    item["images"] = images[item["key"]]
         args = {"op": "create", "items": items, "questions": questions}
         if concurrency is not None:
             args["concurrency"] = int(concurrency)

@@ -1739,10 +1739,32 @@ def _mime_bundle(value: Any) -> dict:
     return bundle
 
 
+_MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+
+
+def _safe_display_json(value: Any) -> Any:
+    """Encode integers outside JavaScript's exact range as decimal strings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return (
+            str(value)
+            if value > _MAX_SAFE_JSON_INTEGER or value < -_MAX_SAFE_JSON_INTEGER
+            else value
+        )
+    if isinstance(value, dict):
+        return {key: _safe_display_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_safe_display_json(item) for item in value]
+    return value
+
+
 def _emit_display(bundle: dict, *, kind: str = "display") -> None:
     rid = _CURRENT_RID.get()
     if rid is None:
         return
+    if "application/json" in bundle:
+        bundle = {**bundle, "application/json": _safe_display_json(bundle["application/json"])}
     _emit({"type": kind, "id": rid, "bundle": bundle})
 
 

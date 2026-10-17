@@ -59,6 +59,10 @@ class "deepseek" {
 	on "alibaba-token-plan" "deepseek" {
 		supports-developer-role #false
 	}
+	// Replaces the provider-keyed leaked chat-template special-token strip.
+	on "nvidia" "deepseek" {
+		strip-deepseek-special-tokens #true
+	}
 	on "deepseek" "opencode-go" {
 		family "pro" {
 			max-tokens-field "max_tokens"

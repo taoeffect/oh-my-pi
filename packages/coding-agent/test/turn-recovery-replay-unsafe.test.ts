@@ -1322,4 +1322,30 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(continues).toEqual([]);
 		});
 	});
+
+	describe("reasonless abort carrying only a fallback boundary", () => {
+		// A mid-turn server-side fallback persists a `fallback` boundary block
+		// before the fallback model emits anything. An abort right there leaves
+		// `[fallback]`: bookkeeping, no output, so the turn is as replay-safe to
+		// retry as an empty one.
+		function abortedTurn(content: AssistantMessage["content"]): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.stopReason = "aborted";
+			message.errorMessage = "Request was aborted";
+			return message;
+		}
+
+		it("retries a boundary-only abort and still settles one carrying output", () => {
+			const boundary = abortedTurn([
+				{ type: "fallback", from: { model: "claude-opus-5-5" }, to: { model: "claude-opus-4-8" } },
+			]);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(boundary)).toBe(true);
+
+			const withOutput = abortedTurn([
+				{ type: "fallback", from: { model: "claude-opus-5-5" }, to: { model: "claude-opus-4-8" } },
+				{ type: "text", text: "Partial answer" },
+			]);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
+		});
+	});
 });

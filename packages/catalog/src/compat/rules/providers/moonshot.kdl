@@ -6,6 +6,8 @@ provider "moonshot" {
 	// as a fallback so China users need not learn MOONSHOT_API_KEY. (#2883)
 	env "MOONSHOT_API_KEY" "KIMI_API_KEY"
 	discovery label="Moonshot"
+	// Moonshot's China platform, selected with MOONSHOT_BASE_URL (#2883).
+	endpoint-hosts "api.moonshot.cn"
 
 	class "kimi" {
 		// Replaces the Moonshot Kimi thinking-format branch.

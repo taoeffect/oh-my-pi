@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
@@ -75,7 +75,12 @@ import {
 	cfgEditFuzzyMatch,
 	cfgEditFuzzyThreshold,
 } from "./settings";
-import { cfgLspDiagnosticsDeduplicate, cfgLspDiagnosticsOnEdit, cfgLspFormatOnWrite } from "../lsp/settings";
+import {
+	cfgLspDiagnosticsDeduplicate,
+	cfgLspDiagnosticsOnEdit,
+	cfgLspFormatOnWrite,
+	cfgLspRequestTimeout,
+} from "../lsp/settings";
 
 export type {
 	EditRenderContext,
@@ -179,6 +184,7 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 				transformDiagnostics: deduplicate
 					? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
 					: undefined,
+				requestTimeoutSec: cfgLspRequestTimeout.get(session.settings),
 			})
 		: writethroughNoop;
 }
@@ -294,9 +300,37 @@ function capPerFileSnapshots(entries: EditToolPerFileResult[]): EditToolPerFileR
 
 async function mkdirAllowingFallback(directory: string): Promise<void> {
 	try {
-		await mkdir(directory, { recursive: true });
+		await fs.mkdir(directory, { recursive: true });
 	} catch (error) {
 		if (!hasFileWriteFallback() || !isPermissionDeniedError(error)) throw error;
+	}
+}
+
+/**
+ * Permission bits a move carries to its destination, or undefined where they cannot be read:
+ * Windows has no POSIX mode, and a source the process may not stat is moved by the
+ * privileged fallback writer, which keeps the destination's own mode.
+ */
+async function movedFileMode(filePath: string): Promise<number | undefined> {
+	if (process.platform === "win32") return undefined;
+	try {
+		return (await fs.stat(filePath)).mode & 0o7777;
+	} catch (error) {
+		if (isPermissionDeniedError(error)) return undefined;
+		throw error;
+	}
+}
+
+/**
+ * Give a moved file its source's mode. The content is already at the destination, possibly
+ * written by a privileged fallback writer, so a destination that denies mode changes keeps
+ * its own mode instead of failing the move halfway with both files left behind.
+ */
+async function chmodMovedFile(filePath: string, mode: number): Promise<void> {
+	try {
+		await fs.chmod(filePath, mode);
+	} catch (error) {
+		if (!isPermissionDeniedError(error)) throw error;
 	}
 }
 
@@ -667,8 +701,10 @@ export class EditTool implements AgentTool<TInput> {
 			if (!request.moveTo) {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
+			const mode = await movedFileMode(request.path);
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
 			await writeFileWithFallback(request.moveTo, request.content);
+			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(

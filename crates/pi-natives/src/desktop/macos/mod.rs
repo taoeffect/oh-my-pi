@@ -12,9 +12,9 @@ use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use session::screen_state;
 
-use self::{ax::MacAx, capture::MacCapture, input::MacInput, session::DisplayAwake};
+use self::{ax::MacAx, capture::MacCapture, input::MacInput};
 use super::{
-	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
+	backend::{AxBackend, Backend, DeliveryMode, DisplayAwakeHold, PointerEvent},
 	control::OperationToken,
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
@@ -26,19 +26,17 @@ use super::{
 };
 
 pub struct MacosBackend {
-	capture:       MacCapture,
-	input:         MacInput,
-	ax:            MacAx,
-	display_awake: DisplayAwake,
+	capture: MacCapture,
+	input:   MacInput,
+	ax:      MacAx,
 }
 
 impl MacosBackend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
 		Ok(Self {
-			capture:       MacCapture::new(display),
-			input:         MacInput::new()?,
-			ax:            MacAx::new(),
-			display_awake: DisplayAwake::default(),
+			capture: MacCapture::new(display),
+			input:   MacInput::new()?,
+			ax:      MacAx::new(),
 		})
 	}
 
@@ -100,8 +98,8 @@ impl Backend for MacosBackend {
 		session::screen_state(display.unwrap_or_else(|| self.capture.selector()))
 	}
 
-	fn keep_display_awake(&mut self, awake: bool) {
-		self.display_awake.set(awake);
+	fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
+		session::hold_display_awake().map(|hold| Box::new(hold) as DisplayAwakeHold)
 	}
 
 	fn capture(

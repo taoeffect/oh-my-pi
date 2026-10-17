@@ -4,6 +4,7 @@ import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
 	atCompletionMatches,
+	extractAtFilePrefix,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
 	isDirectoryCompletionValue,
@@ -99,7 +100,6 @@ function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEdito
 	return true;
 }
 const MENTION_CONTEXT_RE = /(?:^|\s)\^[^\s]*$/;
-const AT_TOKEN_RE = /(?:^|\s)(@[^\s]*)$/;
 
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
@@ -1764,7 +1764,7 @@ export class Editor implements Component, Focusable {
 		let typed = this.#autocompletePrefix;
 		if (typed.startsWith("@")) {
 			const line = this.#state.lines[this.#state.cursorLine] ?? "";
-			typed = AT_TOKEN_RE.exec(line.slice(0, this.#state.cursorCol))?.[1] ?? typed;
+			typed = extractAtFilePrefix(line.slice(0, this.#state.cursorCol)) ?? typed;
 		}
 		typed = typed.replace(/^[/@:#$^]"?/, "");
 		return typed.slice(typed.lastIndexOf("/") + 1);
@@ -3348,7 +3348,7 @@ export class Editor implements Component, Focusable {
 					this.#tryTriggerAutocomplete();
 				}
 				// Check if we're in an @ file reference context
-				else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+				else if (extractAtFilePrefix(textBeforeCursor)) {
 					this.#tryTriggerAutocomplete();
 				}
 				// Check if we're in a model mention context
@@ -3472,7 +3472,7 @@ export class Editor implements Component, Focusable {
 		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 		if (this.#isInSlashAutocompleteContext()) {
 			this.#tryTriggerAutocomplete();
-		} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+		} else if (extractAtFilePrefix(textBeforeCursor)) {
 			this.#tryTriggerAutocomplete();
 		} else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
 			this.#tryTriggerAutocomplete();
@@ -3675,7 +3675,7 @@ export class Editor implements Component, Focusable {
 				this.#tryTriggerAutocomplete();
 			}
 			// @ file reference context
-			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+			else if (extractAtFilePrefix(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
 			}
 			// model mention context
@@ -3850,7 +3850,7 @@ export class Editor implements Component, Focusable {
 			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 			if (this.#isInSlashAutocompleteContext()) {
 				this.#tryTriggerAutocomplete();
-			} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+			} else if (extractAtFilePrefix(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
 			} else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
@@ -4187,7 +4187,7 @@ export class Editor implements Component, Focusable {
 				this.#tryTriggerAutocomplete();
 			}
 			// @ file reference context
-			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+			else if (extractAtFilePrefix(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
 			}
 			// model mention context
@@ -4448,8 +4448,8 @@ export class Editor implements Component, Focusable {
 	 * - Mid-prompt skill branch re-anchors when the popup item is a skill and the
 	 *   current text still ends in a matching trailing slash token, preventing a
 	 *   stale selection from replacing a newer skill prefix.
-	 * - `@`-file branch re-anchors via `#extractAtPrefix`; safe when the current text
-	 *   still ends in a whitespace-anchored `@<token>`.
+	 * - `@`-file branch re-anchors via `extractAtFilePrefix`; safe when the current text
+	 *   still ends in a whitespace-anchored or double-quoted `@` token.
 	 * - Everything else is stale — accepting it would corrupt the buffer (issue #4295).
 	 */
 	#autocompletePrefixMatchesCursorText(currentTextBeforeCursor: string, item?: SelectItem | null): boolean {
@@ -4484,7 +4484,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		if (this.#autocompletePrefix.startsWith("@")) {
-			return /(?:^|\s)@[^\s]*$/.test(currentTextBeforeCursor);
+			return extractAtFilePrefix(currentTextBeforeCursor) !== null;
 		}
 
 		if (this.#autocompletePrefix.startsWith("^")) {
@@ -4879,8 +4879,8 @@ export class Editor implements Component, Focusable {
 	#narrowAtFileList(): void {
 		if (!this.#autocompleteList || !this.#autocompletePrefix.startsWith("@")) return;
 		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-		const token = AT_TOKEN_RE.exec(currentLine.slice(0, this.#state.cursorCol))?.[1];
-		if (token !== undefined) this.#autocompleteList.setFilter(token);
+		const token = extractAtFilePrefix(currentLine.slice(0, this.#state.cursorCol));
+		if (token !== null) this.#autocompleteList.setFilter(token);
 	}
 
 	#invalidateAutocompleteRequests(): void {

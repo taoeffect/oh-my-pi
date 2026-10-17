@@ -216,6 +216,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	#proc: Subprocess | null = null;
 	#stdin: Bun.FileSink | null = null;
 	#alive = true;
+	readonly #died = Promise.withResolvers<void>();
 	#disposed = false;
 	#shutdownConfirmed = false;
 	#shutdownInFlight: Promise<KernelShutdownResult> | null = null;
@@ -234,7 +235,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		this.#stdin = proc.stdin;
 		this.#exitedPromise = proc.exited;
 		void this.#exitedPromise.then(code => {
-			this.#alive = false;
+			this.#markDead();
 			this.#abortPendingExecutions(`${this.#options.languageName} kernel exited with code ${code}`, {
 				kernelKilled: true,
 			});
@@ -246,6 +247,19 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 	isAlive(): boolean {
 		return this.#alive && !this.#disposed;
+	}
+
+	/**
+	 * Settles once the kernel stops accepting work: subprocess exit or the start
+	 * of a shutdown. Retained-state reporting uses it to mark the kernel dead.
+	 */
+	whenDead(): Promise<void> {
+		return this.#died.promise;
+	}
+
+	#markDead(): void {
+		this.#alive = false;
+		this.#died.resolve();
 	}
 
 	async execute(code: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
@@ -431,7 +445,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	}
 
 	async #shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
-		this.#alive = false;
+		this.#markDead();
 		this.#abortPendingExecutions(`${this.#options.languageName} kernel shutdown`, { kernelKilled: true });
 
 		const timeoutMs = options?.timeoutMs ?? this.#options.shutdownGraceMs;

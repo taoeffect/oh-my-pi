@@ -92,6 +92,10 @@ provider "anthropic" {
 	// https://platform.claude.com/docs/en/build-with-claude/vision
 	image-count-budget 90
 	official-image-count-budget 600
+	// The Messages API decodes gzip request bodies and rejects zstd and br
+	// with a 400 (`request_body_encoding_invalid`).
+	request-encodings "gzip"
+	request-encoding-rejection "request_body_encoding_invalid|Unsupported Content-Encoding"
 	class "anthropic" {
 		revision "<4.6" {
 			official-image-count-budget 100

@@ -14,6 +14,8 @@ export interface ResolvedReviewTarget {
 	filteredMessage?: string;
 	diffInstruction?: string;
 	contextInstruction?: string;
+	/** Base URL for per-file slices of the original, unfiltered PR diff. */
+	prDiffUrl?: string;
 }
 
 export interface ReviewTargetUI {
@@ -36,7 +38,7 @@ export function createResolvedReviewTarget(
 	mode: string,
 	rawDiff: string,
 	emptyMessage: string,
-	options: Pick<ResolvedReviewTarget, "filteredMessage" | "diffInstruction" | "contextInstruction"> = {},
+	options: Pick<ResolvedReviewTarget, "filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl"> = {},
 ): ResolvedReviewTarget {
 	return {
 		kind,

@@ -68,6 +68,7 @@ type OllamaMessage = {
 };
 
 type OllamaChatChunk = {
+	error?: string;
 	message?: {
 		role?: string;
 		content?: string;
@@ -252,7 +253,10 @@ function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaM
 		timestamp: Date.now(),
 	}));
 	const messages: Message[] = [...systemMessages, ...context.messages];
-	const isCloud = model.provider === "ollama-cloud";
+	// Model rows cached or bundled before Ollama had a compat record carry none;
+	// stripping is the replay-safe answer for them until they are rebuilt.
+	const compat: Partial<typeof model.compat> | undefined = model.compat;
+	const stripThinkingHistory = compat?.stripThinkingHistory ?? true;
 	const supportsImages = model.input.includes("image");
 	const converted = transformMessages(messages, model).map((msg, index) => {
 		// Real `systemPrompt` entries (always emitted first) stay on Ollama's
@@ -266,10 +270,9 @@ function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaM
 		const developerRole =
 			msg.role === "developer" && (index < systemPrompts.length || msg.attribution !== "user") ? "system" : "user";
 		const converted = convertMessage(msg, supportsImages, developerRole);
-		// Ollama cloud rejects requests when assistant history messages contain the `thinking`
-		// field — it's valid in model responses but not accepted as a history input. Strip it
-		// to prevent HTTP 400 errors. Local Ollama instances are unaffected.
-		if (isCloud && converted.role === "assistant" && converted.thinking) {
+		// Some Ollama Cloud models historically rejected thinking in history (#1000).
+		// Preserve reasoning for the verified model without weakening that guard everywhere.
+		if (stripThinkingHistory && converted.role === "assistant" && converted.thinking) {
 			const { thinking: _t, ...rest } = converted;
 			return rest;
 		}
@@ -619,6 +622,13 @@ const streamOllamaOnce = (
 			}
 			stream.push({ type: "start", partial: output });
 			for await (const chunk of readJsonl<OllamaChatChunk>(response.body)) {
+				// Once HTTP 200 has started, Ollama reports failures as NDJSON error records.
+				if (chunk.error) {
+					throw new AIError.ProviderResponseError(`Ollama stream error: ${chunk.error}`, {
+						provider: model.provider,
+						kind: "runtime",
+					});
+				}
 				if (chunk.message?.thinking) {
 					suppressHealedThinking = true;
 					endActiveTextBlock();

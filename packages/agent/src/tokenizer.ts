@@ -295,7 +295,7 @@ export class Tokenizer {
 	 */
 	countMessage(message: AgentMessage, options?: MessageCountOptions): number {
 		const floored = options?.excludeEncryptedReasoning === true;
-		if (!isEstimateCacheable(message)) return this.#measureMessage(message, floored);
+		if (!isEstimateCacheable(message)) return this.#measureMessage(message, floored, false);
 		const version = messageEstimateVersion(message);
 		let entry = this.#estimates.get(message);
 		if (entry === undefined || entry.version !== version) {
@@ -304,10 +304,23 @@ export class Tokenizer {
 		}
 		const cached = floored ? entry.floored : entry.default;
 		if (cached !== undefined) return cached;
-		const result = this.#measureMessage(message, floored);
+		const result = this.#measureMessage(message, floored, false);
 		if (floored) entry.floored = result;
 		else entry.default = result;
 		return result;
+	}
+
+	/**
+	 * {@link countMessage} for the transcript's latest surviving assistant turn
+	 * (`isSurvivingAssistant`), which an Anthropic Messages replay keeps
+	 * byte-for-byte (`transformMessages`): a turn whose tool calls ended without
+	 * a tool-use stop keeps its signatures then, so its reasoning is charged. A
+	 * count of one message cannot see its position; a caller walking back from
+	 * the end of the transcript counts that turn here. Not memoized: it differs
+	 * from {@link countMessage} only for that one turn.
+	 */
+	countLatestTurn(message: AgentMessage, options?: MessageCountOptions): number {
+		return this.#measureMessage(message, options?.excludeEncryptedReasoning === true, true);
 	}
 
 	/** Sum of {@link countMessage} over `messages`. */
@@ -361,7 +374,7 @@ export class Tokenizer {
 		return total;
 	}
 
-	#measureMessage(message: AgentMessage, excludeEncryptedReasoning: boolean): number {
+	#measureMessage(message: AgentMessage, excludeEncryptedReasoning: boolean, latestTurn: boolean): number {
 		const fragments: string[] = [];
 		let extra = 0;
 		// Declaration-merged app roles (the coding-agent's bashExecution) are
@@ -407,14 +420,20 @@ export class Tokenizer {
 				// The replay's signature rule (`transformMessages`): an aborted or
 				// errored turn's final block can hold a partial signature, and a turn
 				// whose tool calls ended without a tool-use stop is abandoned, so all
-				// its signatures are stripped. Every other block completed. The latest
-				// assistant turn keeps an abandoned turn's signatures byte-for-byte;
-				// a per-message count cannot see position, so it follows the rule for
-				// older turns, and that latest turn's own usage anchors transcript counts.
+				// its signatures are stripped. Every other block completed. On the
+				// Anthropic Messages API the latest assistant turn keeps an abandoned
+				// turn's signatures byte-for-byte (Bedrock's Converse replay strips
+				// them too); a per-message count cannot see position, so it follows
+				// the rule for older turns unless the caller says it is the latest
+				// (`countLatestTurn`).
 				const content = message.content;
 				const invalidStop = message.stopReason === "aborted" || message.stopReason === "error";
+				const keepsLatestSignatures = latestTurn && message.api === "anthropic-messages";
 				const abandonedToolUse =
-					!invalidStop && message.stopReason !== "toolUse" && content.some(block => block.type === "toolCall");
+					!keepsLatestSignatures &&
+					!invalidStop &&
+					message.stopReason !== "toolUse" &&
+					content.some(block => block.type === "toolCall");
 				const untrustedIndex = invalidStop ? content.length - 1 : -1;
 				let signedReasoning = false;
 				for (let index = 0; index < content.length; index++) {

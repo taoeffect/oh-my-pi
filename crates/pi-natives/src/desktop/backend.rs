@@ -101,6 +101,9 @@ pub enum PointerEvent {
 	},
 }
 
+/// A held prevent-idle-display-sleep assertion; dropping it releases it.
+pub type DisplayAwakeHold = Box<dyn Send>;
+
 pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
@@ -111,9 +114,11 @@ pub trait Backend: Send {
 	fn screen_state(&mut self, _display: Option<&DisplaySelector>) -> ScreenState {
 		ScreenState::default()
 	}
-	/// Hold (`true`) or release (`false`) the platform's prevent-idle-display-
-	/// sleep assertion. Idempotent; backends without one ignore it.
-	fn keep_display_awake(&mut self, _awake: bool) {}
+	/// Start the platform's prevent-idle-display-sleep assertion, held until the
+	/// returned guard drops. Backends without one return `None`.
+	fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
+		None
+	}
 	/// Explicit display keyboard input must establish the focused surface's
 	/// real global monitor, not infer it from window-relative coordinates.
 	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {

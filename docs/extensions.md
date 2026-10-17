@@ -887,6 +887,10 @@ Current no-op methods in this controller:
 
 `ctx.ui.setEditorComponent(factory)` is wired to the live editor; the factory
 must return a `CustomEditor` subclass, not a plain `Editor`/`EditorComponent`.
+`ctx.ui.getEditorComponent()` returns the factory currently installed (or
+`undefined` for the built-in editor), so an extension can wrap another
+extension's editor instead of replacing it; inside a factory it still returns
+the previous one.
 `setWidget` renders widget components above or below the editor via
 `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string arrays show
 up to 10 content lines plus a truncation notice). Pass `undefined` to remove a
@@ -988,12 +992,18 @@ direct argv execution. Zellij options that need a newer CLI than the one install
 with an error naming the required version; the dispatcher checks `zellij --version`
 once per process.
 
-Herdr `pane run`, CMUX `--command`, and Orca `terminal split`/`terminal create`
+Herdr `pane run` types text into the destination's interactive shell, so the
+adapter writes the POSIX-quoted argv to a private, self-deleting `/bin/sh` script
+under the temp directory and types only its absolute path. Any interactive shell
+that runs a bare path (POSIX shells, fish, Nushell) launches the exact argv, so
+Herdr requests take no `shellGrammar`. Herdr launches are rejected on Windows.
+
+CMUX `--command` and Orca `terminal split`/`terminal create`
 submit shell command text to the destination's interactive shell rather than
 launching argv directly. Their requests therefore require `shellGrammar: "posix"`.
 Set it only after confirming that the destination shell accepts POSIX syntax; it
 is not inferred from the local OS or `$SHELL`, and the configured shell is not
-guessed. Without that assertion, do not request a Herdr, CMUX, or Orca launch.
+guessed. Without that assertion, do not request a CMUX or Orca launch.
 Once asserted, argv words are quoted with the shared POSIX shell-quoting helpers.
 Orca split/create have no `--cwd` flag, so the adapter prepends
 `cd <quoted-cwd> &&` before the quoted command in `--command`; CMUX split also
@@ -1046,7 +1056,7 @@ Unsupported/no-op in RPC implementation:
 
 - `onTerminalInput`
 - `custom`; optional `askDialog` is absent
-- `getEditorText` returns `""`
+- `getEditorText` returns `""`; `getEditorComponent` returns `undefined`
 - `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
 - `setWorkingMessage`
 - theme switching/loading (`setTheme` returns failure)

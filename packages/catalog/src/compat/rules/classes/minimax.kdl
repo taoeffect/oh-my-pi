@@ -7,6 +7,16 @@ class "minimax" {
 	}
 	// Replaces the MiniMax lineage branch in both OpenAI baselines.
 	reasoning-deltas-may-be-cumulative #true
+	// Replaces the identity default: M2/M3 thinking rides Anthropic adaptive
+	// thinking on every Messages route, custom provider ids included.
+	on-api "anthropic-messages" {
+		family "m2" {
+			thinking-mode "anthropic-adaptive"
+		}
+		family "m3" {
+			thinking-mode "anthropic-adaptive"
+		}
+	}
 	on "aimlapi" "coreweave" "fireworks" "huggingface" "kilo" "nanogpt" "novita" "nvidia" \
 		"opencode-go" "opencode-zen" "together" "venice" "wafer-serverless" "zenmux" {
 		family "m3" {
@@ -30,7 +40,7 @@ class "minimax" {
 	// upstream metadata, not the model ceiling (documented: 1M in / 128K out).
 	// Exact selectors are case-sensitive, so both served spellings are listed:
 	// MiniMax hosts publish `MiniMax-M3`, Charm Hyper publishes `minimax-m3`.
-	on "charm-hyper" "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+	on "charm-hyper" "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" "sambanova" {
 		models "MiniMax-M3" "minimax-m3" {
 			limits-patch {
 				context-window 1000000

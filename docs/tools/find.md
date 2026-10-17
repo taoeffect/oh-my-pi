@@ -38,12 +38,13 @@ Use `find` first when the implementing location is unknown. Use `grep` for known
 - Single text block, strongest hit first:
   - header `N hit(s) for "query" (τ 0.20), strongest first`
   - per hit: `path  score  N lines judged[, partial]`, then up to three `path:start-end  p  snippet` rows (strongest range first)
-  - footer with `listed`, `judged`, files read and bytes sent, request count, input tokens, cost, and wall/API time
-  - when requests failed: `E of R requests failed:` followed by up to five distinct phase-prefixed failure messages
+  - footer with `listed`, `judged`, files read and bytes sent, request count (plus `N unanswered` when a successful response left questions without a usable answer), input tokens, cost, and wall/API time
+  - when anything failed: `failures:` followed by up to five distinct phase-prefixed failure messages
 - No hits: `no hits for "query" (τ 0.20)` plus the footer; the result is marked `useless`.
-- Every request failed (for example no judge configured): the result is an error carrying the failure messages.
+- Some judge requests failed: a `partial: F of R judge requests failed; unjudged files may still match` line follows the header.
+- Every judge request failed (for example no judge configured, or the provider rejects the account): the header reads `find unavailable for "query": all R judge requests failed, nothing was judged. This is not evidence of absence; use grep.` and the result is an error. `omp find` prints the same status and exits 1.
 - When `path` narrows the search, the header reads `N hit(s) for "query" in <dir>/ …` and the renderer shows `in <dir>/`.
-- `details`: `query`, `keywords` (lexical keywords used), `threshold`, `hits` (`rel` as a readable host path or URL, `nameScore`, `contentScore`, merged `ranges` with `start`/`end`/`p`/`snippet`, `linesSeen`, `truncated`), `stats`, `elapsedMs`, `cwd` (hyperlink base), and `scopePath` (display form of `path`, absent when searching the cwd).
+- `details`: `query`, `keywords` (lexical keywords used), `threshold`, `hits` (`rel` as a readable host path or URL, `nameScore`, `contentScore`, merged `ranges` with `start`/`end`/`p`/`snippet`, `linesSeen`, `truncated`), `coverage` (`complete`, `partial`, or `unavailable`, from `stats.failed` vs `stats.requests`; also in `omp find --json`), `stats` (`failed` counts failed judge requests, `unanswered` counts unusable answers), `elapsedMs`, `cwd` (hyperlink base), and `scopePath` (display form of `path`, absent when searching the cwd).
 - Streaming: phase progress (`lexical scan`, `filename ranking 64/128`, `verifying 8 passages in 5 files`, …) is emitted through `onUpdate` and shown in the transcript header while the call runs.
 
 ## Flow

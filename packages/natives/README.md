@@ -41,12 +41,21 @@ const files = await find({
 
 // SIXEL encode for a terminal cell box (px), off the JS thread
 // (`encodeSixel` is the synchronous form)
-const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx);
+const backgroundRgb = 0x202040; // Actual terminal background, packed 0xRRGGBB
+const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx, backgroundRgb);
 
 // Extract PDF text and identify pages that still need OCR
 const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
+
+Both SIXEL encoder forms require the terminal background as a fourth argument,
+packed as a 24-bit `0xRRGGBB` number. When resizing images with alpha, RGB is
+premultiplied before Lanczos filtering so transparent pixels cannot darken or
+discolor visible edges. After resizing, the terminal background is composited
+without applying alpha twice. Fully transparent pixels remain transparent;
+unscaled images retain their existing blending path. Re-encode when the terminal
+background RGB changes.
 
 ### Lazy Windows path helpers
 

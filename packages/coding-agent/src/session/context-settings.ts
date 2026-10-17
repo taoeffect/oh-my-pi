@@ -81,7 +81,8 @@ export const cfgContextPromotionEnabled = register({
 		tab: "context",
 		group: "General",
 		label: "Auto-Promote Context",
-		description: "Promote to a larger-context model on context overflow instead of compacting",
+		description:
+			"Promote to the model's contextPromotionTarget on context overflow instead of compacting. Retry fallback switches are controlled by Retry Model Fallback",
 	},
 });
 

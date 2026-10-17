@@ -7,8 +7,10 @@
  * - format the generic approval prompt body.
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-
+import { normalizeToLF } from "../edit/normalize";
 import { cfgToolsApproval, cfgToolsApprovalMode } from "./settings";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
@@ -374,6 +376,67 @@ export function isTruncatedForPrompt(value: string): boolean {
 	return open >= 0 && value.includes(ELISION_CLOSE, open + ELISION_OPEN.length);
 }
 
+function formatPayloadValue(value: unknown, indent: number): string {
+	if (value === null) return "null";
+	if (typeof value === "boolean" || typeof value === "number") return String(value);
+	if (typeof value === "string") {
+		const normalized = replaceTabs(normalizeToLF(value));
+		if (normalized.includes("\n")) {
+			const padding = " ".repeat(indent);
+			// Keep delimiters and commas outside the body, including in arrays.
+			// JSON-escape each row so terminal controls remain visible text.
+			const lines = normalized
+				.split("\n")
+				.map(line => `${padding}  ${sanitizeText(JSON.stringify(line).slice(1, -1))}`);
+			return `"\n${lines.join("\n")}\n${padding}"`;
+		}
+		return sanitizeText(JSON.stringify(normalized));
+	}
+	if (Array.isArray(value)) {
+		if (value.length === 0) return "[]";
+		const items = value.map((item, index) => {
+			const isLast = index === value.length - 1;
+			const nextIndent = indent + 2;
+			const formatted = formatPayloadValue(item, nextIndent);
+			return " ".repeat(nextIndent) + formatted + (isLast ? "" : ",");
+		});
+		return "[\n" + items.join("\n") + "\n" + " ".repeat(indent) + "]";
+	}
+	if (isRecord(value)) {
+		const entries = Object.entries(value);
+		if (entries.length === 0) return "{}";
+		const lines: string[] = ["{"];
+		for (let i = 0; i < entries.length; i++) {
+			const [key, entryValue] = entries[i]!;
+			const isLast = i === entries.length - 1;
+			const keyStr = sanitizeText(JSON.stringify(key));
+			const keyIndent = " ".repeat(indent + 2);
+			const formatted = formatPayloadValue(entryValue, indent + 2);
+			lines.push(`${keyIndent}${keyStr}: ${formatted}${isLast ? "" : ","}`);
+		}
+		lines.push(" ".repeat(indent) + "}");
+		return lines.join("\n");
+	}
+	return replaceTabs(sanitizeText(String(value)));
+}
+
+/**
+ * Layout a decoded device or MCP argument payload:
+ * - standard JSON layout with 2-space indentation
+ * - multiline strings (manifests, scripts, policy documents) expanded into quoted blocks
+ * - tabs sanitized to spaces
+ */
+export function formatApprovalArguments(args: unknown, options?: { showEmpty?: boolean }): string[] {
+	if (args === undefined) {
+		return [];
+	}
+	if (!options?.showEmpty && (args === null || (typeof args === "object" && Object.keys(args).length === 0))) {
+		return [];
+	}
+	const formatted = formatPayloadValue(args, 0);
+	return [`Arguments:\n${truncateForPrompt(formatted)}`];
+}
+
 /**
  * Format the approval prompt body shown to the user.
  */
@@ -395,6 +458,8 @@ export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reaso
 		for (const detail of details) {
 			if (detail.length > 0) lines.push(detail);
 		}
+	} else if (tool.name.startsWith("mcp__")) {
+		lines.push(...formatApprovalArguments(args));
 	}
 
 	return lines.join("\n");

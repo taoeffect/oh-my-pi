@@ -512,6 +512,24 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(active?.warning).toContain(IMAGE_REMEDY_FRAGMENT);
 	});
 
+	it("identifies irreducible fixed context instead of blaming tool output", async () => {
+		await createSession({ frameCount: SEEDED_FRAME_COUNT });
+		session.agent.setSystemPrompt(["fixed instructions ".repeat(40_000)]);
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
+		const notices = collectNotices();
+		await triggerMaintenance();
+		const warning = notices.find(n => n.source === NOTICE_SOURCE && n.message.includes("fixed context"));
+		expect(warning?.message).toContain("compaction.modelThresholds");
+		expect(warning?.message).not.toContain("clear large tool output");
+	});
+
 	it("bails when the kept tail plus fixed context leaves no frame budget", async () => {
 		// Codex review on #6362 (round 5): a tail just under the recovery band
 		// still cannot coexist with the fixed context + a minimum rebuilt

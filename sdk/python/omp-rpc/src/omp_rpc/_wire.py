@@ -212,6 +212,8 @@ class ThinkingContent(TypedDict):
     thinking: str
     thinkingSignature: NotRequired[str]
     itemId: NotRequired[str]
+    narration: NotRequired[bool]
+    """Prose the model addressed to the user, returned by the provider as thinking; present it as answer text."""
 
 
 class RedactedThinkingContent(TypedDict):
@@ -707,6 +709,7 @@ class CompactionResult:
     short_summary: str | None = None
     details: JsonValue | None = None
     preserve_data: JsonObject | None = None
+    provider_replay_through_entry_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -945,6 +948,8 @@ class PromptAck:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AgentStartEvent:
     type: Literal["agent_start"] = "agent_start"
+    resumed_tool_call_ids: tuple[str, ...] | None = None
+    """Calls of an unpaired assistant tail a continued run executes before its first model request."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1985,6 +1990,7 @@ def parse_compaction_result(value: object, path: str = "CompactionResult") -> Co
         short_summary=optional(payload, "shortSummary", decode_str, path),
         details=optional(payload, "details", decode_json, path),
         preserve_data=optional(payload, "preserveData", decode_json_object, path),
+        provider_replay_through_entry_id=optional(payload, "providerReplayThroughEntryId", decode_str, path),
     )
 
 
@@ -2261,6 +2267,7 @@ def parse_agent_start_event(value: object, path: str = "AgentStartEvent") -> Age
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["agent_start"]]', literal(frozenset({"agent_start"}))), path)
     return AgentStartEvent(
+        resumed_tool_call_ids=optional(payload, "resumedToolCallIds", array(decode_str), path),
     )
 
 

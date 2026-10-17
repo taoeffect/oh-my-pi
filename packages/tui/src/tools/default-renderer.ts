@@ -7,7 +7,7 @@ import type { Theme } from "../theme/theme";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import { renderStatusLine, type StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
-import { truncateToWidth } from "../render/render-utils";
+import { clipCollapsed } from "../render/render-utils";
 import {
 	describeJsonTree,
 	formatArgsInline,
@@ -133,7 +133,8 @@ function buildDefaultToolBody(input: DefaultToolRenderInput, uiTheme: Theme, con
 							expanded: options.expanded,
 							collapsedMaxLines: 4,
 							expandedMaxLines: 12,
-							styleLine: line => truncateToWidth(styleToolOutputLine(line, uiTheme), contentWidth),
+							styleLine: line =>
+								clipCollapsed(styleToolOutputLine(line, uiTheme), contentWidth, options.expanded),
 							showExpandHintWhenUncapped: true,
 						},
 						uiTheme,

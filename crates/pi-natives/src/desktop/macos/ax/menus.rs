@@ -7,7 +7,6 @@ use super::{
 	mac_handle, perform_action, set_timeout, skylight, window_id,
 };
 use crate::desktop::{
-	backend::AxBackend,
 	control,
 	error::{CoreResult, DesktopError},
 	menus::{DesktopMenuItem, match_index, require_command, require_enabled, validate_path},
@@ -63,7 +62,7 @@ fn window_menu_context(
 		.id
 		.parse::<u32>()
 		.map_err(|_| DesktopError::invalid_target("invalid macOS menu window id"))?;
-	let root = MacAx::new().window_root(window)?;
+	let root = MacAx::window_element(window)?;
 	let root = mac_handle(&root)?;
 	if window_id(root) != Some(wid) {
 		return Err(DesktopError::background_unavailable(

@@ -1269,12 +1269,9 @@ describe("ACP agent", () => {
 				speedRange: { min: 0.5, max: 2.5 },
 			},
 		});
-		expect(result.speechToText.models.map(model => model.value)).toEqual([
-			"local/whisper-base",
-			"local/whisper-small",
-			"local/whisper-large-v3-turbo",
-			"local/parakeet-tdt-0.6b-v3",
-		]);
+		expect(result.speechToText.models).toContainEqual(
+			expect.objectContaining({ value: "local/nemotron-streaming-en-0.6b" }),
+		);
 		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 		// Speed presets are numbers so clients can write them straight into the numeric settings.

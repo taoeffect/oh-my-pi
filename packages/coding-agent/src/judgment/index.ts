@@ -22,7 +22,10 @@ import {
 	type AssistantMessage,
 	chatTextBackend,
 	createNativeJudge,
+	type ImageContent,
 	isJudgmentApi,
+	nativeJudgmentAcceptsImages,
+	nativeJudgmentSupportsImages,
 	type Judge,
 	type JudgeOptions,
 	type JudgmentRequest,
@@ -39,8 +42,11 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { normalizeModelContextImages } from "../utils/image-loading";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -149,29 +155,56 @@ const kRejections = Symbol("judgment.rejections");
 const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
 	[kRejections]?: Map<string, number>;
-	[kRoleChain]?: { settings: Settings; revision: number; list: RoleChainCandidate[]; expiresAt: number };
+	[kRoleChain]?: {
+		settings: Settings;
+		revision: number;
+		roleChain: RoleChainCandidate[];
+		list: RoleChainCandidate[];
+		expiresAt: number;
+	};
 }
 
 /**
- * {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry.
- * A settings change (e.g. a new judge role) resolves afresh; registry or credential changes still wait out the TTL,
- * so {@link hasNativeJudge} (uncached) can briefly see a different chain after a login or discovery change.
+ * The resolved `judge` role chain and its text {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS}
+ * across judges over the same settings and registry. A settings change (e.g. a new judge role) resolves
+ * afresh; registry or credential changes still wait out the TTL, so {@link hasNativeJudge} (uncached) can
+ * briefly see a different chain after a login or discovery change.
  */
-function cachedJudgeRoleChain(settings: Settings, registry: RegistryWithRejections): RoleChainCandidate[] {
+function cachedJudgeRoleChain(
+	settings: Settings,
+	registry: RegistryWithRejections,
+): { roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] } {
 	const now = Date.now();
 	const revision = settings.revision;
 	const cached = registry[kRoleChain];
 	if (cached && cached.settings === settings && cached.revision === revision && now < cached.expiresAt) {
-		return cached.list;
+		return cached;
 	}
-	const list = judgeRoleChain(settings, registry);
-	registry[kRoleChain] = { settings, revision, list, expiresAt: now + CANDIDATE_TTL_MS };
-	return list;
+	const roleChain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+	const entry = {
+		settings,
+		revision,
+		roleChain,
+		list: textJudgeRoleChain(roleChain),
+		expiresAt: now + CANDIDATE_TTL_MS,
+	};
+	registry[kRoleChain] = entry;
+	return entry;
 }
 
-/** Append the session model when no candidate is native and the chain does not already route to it. */
-function withSessionFallback(candidates: RoleChainCandidate[], sessionModel: Model | undefined): RoleChainCandidate[] {
-	if (!sessionModel || candidates.some(candidate => kindOf(candidate) === "native")) return candidates;
+/** Append a compatible session model when no candidate is native and the chain does not already route to it. */
+function withSessionFallback(
+	candidates: RoleChainCandidate[],
+	sessionModel: Model | undefined,
+	requiresImages = false,
+): RoleChainCandidate[] {
+	if (
+		!sessionModel ||
+		candidates.some(candidate => kindOf(candidate) === "native") ||
+		(requiresImages && !supportsImageJudgment(sessionModel))
+	) {
+		return candidates;
+	}
 	const sessionIdentity = formatModelStringWithRouting(sessionModel);
 	if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {
 		return candidates;
@@ -192,17 +225,47 @@ export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 	return "online";
 }
 
+/** Whether the model's actual judgment transport sends image input. */
+function supportsImageJudgment(model: Model): boolean {
+	switch (kindOf(model)) {
+		case "native":
+			return nativeJudgmentSupportsImages(model);
+		case "local":
+			return false;
+		case "online":
+			return sendsImageInputOnWire(model);
+	}
+}
+
 /**
  * The `judge` role's candidates in attempt order, drawn from credentialed
  * judge-capable models. From the first native candidate on, only native
  * candidates remain: a prompted model never stands in for a failed native
  * judgment, whose calibrated probabilities it cannot reproduce.
  */
-function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
-	const chain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+function textJudgeRoleChain(chain: RoleChainCandidate[]): RoleChainCandidate[] {
 	const firstNative = chain.findIndex(candidate => kindOf(candidate) === "native");
 	if (firstNative < 0) return chain;
 	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
+}
+
+/**
+ * Filter candidates that cannot take `images` before applying the native-only tail policy. A native
+ * judge is checked against its dialect's documented bounds, which it never resizes to fit; prompted
+ * chat models normalize images per model, so their image support alone decides.
+ */
+function imageJudgeRoleChain(chain: RoleChainCandidate[], images: readonly ImageContent[]): RoleChainCandidate[] {
+	return textJudgeRoleChain(
+		chain.filter(candidate =>
+			kindOf(candidate) === "native"
+				? nativeJudgmentAcceptsImages(candidate.model, images)
+				: supportsImageJudgment(candidate.model),
+		),
+	);
+}
+
+function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
+	return textJudgeRoleChain(resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry)));
 }
 
 /**
@@ -230,6 +293,7 @@ export class ChainJudge implements Judge {
 	readonly label = "judge role chain";
 	readonly #deps: JudgeDeps;
 	readonly #telemetry: AgentTelemetry | undefined;
+	/** Text-judgment candidates memoized per resolved chain; image candidates depend on each request's images. */
 	#candidates: { chain: RoleChainCandidate[]; list: RoleChainCandidate[] } | undefined;
 
 	constructor(deps: JudgeDeps) {
@@ -241,7 +305,29 @@ export class ChainJudge implements Judge {
 		request: JudgmentRequest<Q>,
 		options: JudgeOptions = {},
 	): Promise<JudgmentResult<Q>> {
-		return this.withCandidate(candidate => candidate.judge(request, options), options);
+		const requestImages = request.images ?? [];
+		// Malformed input is the caller's error, not a candidate failure: reject it before trying any candidate.
+		for (const [index, image] of requestImages.entries()) {
+			if (!isEmbeddedImageContent(image)) {
+				throw new AIError.ValidationError(
+					`judgment: images[${index}] must contain non-empty base64 data and an image MIME type`,
+				);
+			}
+		}
+		return this.#withCandidate(
+			async (candidateJudge, kind, model) => {
+				if (kind !== "online" || requestImages.length === 0) return candidateJudge.judge(request, options);
+				const images = (await normalizeModelContextImages([...requestImages], { model })) ?? [];
+				const signal = options.signal;
+				if (signal?.aborted) {
+					const reason = signal.reason;
+					throw reason instanceof Error ? reason : new AIError.AbortError("judgment aborted");
+				}
+				return candidateJudge.judge({ ...request, images }, options);
+			},
+			options,
+			requestImages,
+		);
 	}
 
 	/**
@@ -254,10 +340,21 @@ export class ChainJudge implements Judge {
 	}
 
 	async withCandidate<T>(run: (judge: Judge, kind: JudgeKind) => Promise<T>, options: JudgeOptions = {}): Promise<T> {
+		return this.#withCandidate((judge, kind) => run(judge, kind), options, []);
+	}
+
+	async #withCandidate<T>(
+		run: (judge: Judge, kind: JudgeKind, model: Model) => Promise<T>,
+		options: JudgeOptions,
+		images: readonly ImageContent[],
+	): Promise<T> {
+		const requiresImages = images.length > 0;
 		const signal = options.signal;
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
-		const candidates = this.#resolveCandidates();
+		let compatibleCandidate = false;
+		let unsupportedCandidate = false;
+		const candidates = this.#resolveCandidates(images);
 		const rejections = this.#rejections();
 		for (const candidate of candidates) {
 			if (signal?.aborted) {
@@ -278,7 +375,13 @@ export class ChainJudge implements Judge {
 					lastUnavailable = `no API key for ${candidate.model.provider}/${candidate.model.id}`;
 					continue;
 				}
-				return await run(judge, kindOf(candidate));
+				if (requiresImages && judge.supportsImages !== true) {
+					unsupportedCandidate = true;
+					lastUnavailable = `${identity} does not support image inputs`;
+					continue;
+				}
+				compatibleCandidate = true;
+				return await run(judge, kindOf(candidate), candidate.model);
 			} catch (error) {
 				if (signal?.aborted) {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
@@ -295,7 +398,13 @@ export class ChainJudge implements Judge {
 				});
 			}
 		}
-		if (candidates.length === 0) throw new Error("judgment: no judge model available");
+		if (requiresImages && !compatibleCandidate && unsupportedCandidate) {
+			throw new Error("judgment: no compatible judge candidate supports images");
+		}
+		if (candidates.length === 0) {
+			if (requiresImages) throw new Error("judgment: no compatible judge candidate supports images");
+			throw new Error("judgment: no judge model available");
+		}
 		throw new Error(`judgment: every judge candidate failed: ${lastFailure ?? lastUnavailable ?? "unknown error"}`);
 	}
 
@@ -323,12 +432,13 @@ export class ChainJudge implements Judge {
 		return (registry[kRejections] ??= new Map());
 	}
 
-	#resolveCandidates(): RoleChainCandidate[] {
+	#resolveCandidates(images: readonly ImageContent[] = []): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const candidates = cachedJudgeRoleChain(settings, registry);
-		if (candidates === this.#candidates?.chain) return this.#candidates.list;
-		const list = withSessionFallback(candidates, sessionModel);
-		this.#candidates = { chain: candidates, list };
+		const { roleChain, list: chain } = cachedJudgeRoleChain(settings, registry);
+		if (images.length > 0) return withSessionFallback(imageJudgeRoleChain(roleChain, images), sessionModel, true);
+		if (chain === this.#candidates?.chain) return this.#candidates.list;
+		const list = withSessionFallback(chain, sessionModel);
+		this.#candidates = { chain, list };
 		return list;
 	}
 
@@ -413,12 +523,23 @@ function nativeJudge(
 	const cacheModel = `${model.provider}/${model.id}`;
 	return {
 		label: judge.label,
+		...(judge.supportsImages === undefined ? {} : { supportsImages: judge.supportsImages }),
 		async judge<Q extends Questions>(
 			request: JudgmentRequest<Q>,
 			options?: JudgeOptions,
 		): Promise<JudgmentResult<Q>> {
 			const startedAt = Date.now();
-			const cached = cache?.lookup(cacheModel, request);
+			const cacheRequest =
+				request.images === undefined
+					? request
+					: {
+							...request,
+							images: request.images.map(image => ({
+								...image,
+								detail: judge.effectiveImageDetail(image.detail),
+							})),
+						};
+			const cached = cache?.lookup(cacheModel, cacheRequest);
 			const known = cached?.answers ?? {};
 			const pending: Questions = {};
 			let questions = 0;
@@ -443,7 +564,11 @@ function nativeJudge(
 				let partial = tokenUsage(0, 0);
 				try {
 					fresh = await judge.judge(
-						{ state: request.state, questions: pending },
+						{
+							state: request.state,
+							questions: pending,
+							...(request.images === undefined ? {} : { images: request.images }),
+						},
 						{
 							signal: options?.signal,
 							onPartialUsage: usage => {

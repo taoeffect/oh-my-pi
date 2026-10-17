@@ -10,7 +10,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
 - `open`, `close`, and `run` take `timeout` in seconds (default 30, capped by `tools.maxTimeout` when set, clamped to 1–300); `waitFor*` helpers take `timeout` in milliseconds.
 - Direct tab helpers:
   - Navigation: `url`, `title`, `goto`, `back`, `forward`, `reload`, `pushState`.
-  - Inspection: `observe`, `ariaSnapshot`, `a11y`, `screenshot`, `diffScreenshot`, `pdf`, `extract`, `text`, `html`, `value`, `attr`, `count`, `box`, `styles`, `isVisible`, `isEnabled`, `isChecked`.
+  - Inspection: `observe`, `ariaSnapshot`, `a11y`, `screenshot`, `diffScreenshot`, `pdf`, `extract`, `text`, `html`, `value`, `attr`, `count`, `box`, `styles`, `isVisible`, `isEnabled`, `isChecked`. `text()` and `html()` without a selector read the page `<body>`.
   - Snapshot options: `observe({selector?, compact?, viewportOnly?, includeAll?})` (`viewportOnly`: on-screen elements only, ignored on cmux; `includeAll`: non-interactive nodes too); `ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?})`.
   - Screenshot options: `screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?})`; `diffScreenshot(baselinePath, {threshold?, output?})`; `pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})`.
   - Extraction options: `extract(format?, {selector?, outline?, filter?})`.

@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
+import { decodeRequestBodyBytes } from "./request-body";
 
 const REQUEST_DEBUG_ENV = "PI_REQ_DEBUG";
 const textEncoder = new TextEncoder();
@@ -87,7 +88,7 @@ export async function createFetchRequestDebugSession(
 	init: RequestInit | undefined,
 ): Promise<RequestDebugSession> {
 	const headers = resolveRequestHeaders(input, init);
-	const body = await snapshotRequestBody(input, init, headers.get("content-type"));
+	const body = await snapshotRequestBody(input, init, headers.get("content-type"), headers.get("content-encoding"));
 	return createRequestDebugSession({
 		method: resolveRequestMethod(input, init),
 		url: resolveRequestUrl(input),
@@ -236,30 +237,43 @@ async function snapshotRequestBody(
 	input: string | URL | Request,
 	init: RequestInit | undefined,
 	contentType: string | null,
+	contentEncoding: string | null,
 ): Promise<RequestDebugBody | undefined> {
-	if (init?.body !== undefined && init.body !== null) return snapshotBodyInit(init.body, contentType);
+	if (init?.body !== undefined && init.body !== null) return snapshotBodyInit(init.body, contentType, contentEncoding);
 	if (input instanceof Request && input.body) {
-		return snapshotBytes(new Uint8Array(await input.clone().arrayBuffer()), contentType);
+		return snapshotBytes(new Uint8Array(await input.clone().arrayBuffer()), contentType, contentEncoding);
 	}
 	return undefined;
 }
 
-async function snapshotBodyInit(body: RequestBodyInit, contentType: string | null): Promise<RequestDebugBody> {
+async function snapshotBodyInit(
+	body: RequestBodyInit,
+	contentType: string | null,
+	contentEncoding: string | null,
+): Promise<RequestDebugBody> {
 	if (typeof body === "string") return snapshotText(body, contentType);
 	if (body instanceof URLSearchParams) return { bodyText: body.toString() };
 	if (body instanceof FormData) return { bodyUnavailable: "FormData" };
-	if (body instanceof Blob) return snapshotBytes(new Uint8Array(await body.arrayBuffer()), body.type || contentType);
-	if (body instanceof ArrayBuffer) return snapshotBytes(new Uint8Array(body), contentType);
+	if (body instanceof Blob) {
+		return snapshotBytes(new Uint8Array(await body.arrayBuffer()), body.type || contentType, contentEncoding);
+	}
+	if (body instanceof ArrayBuffer) return snapshotBytes(new Uint8Array(body), contentType, contentEncoding);
 	if (ArrayBuffer.isView(body)) {
-		return snapshotBytes(new Uint8Array(body.buffer, body.byteOffset, body.byteLength), contentType);
+		return snapshotBytes(new Uint8Array(body.buffer, body.byteOffset, body.byteLength), contentType, contentEncoding);
 	}
 	if (body instanceof ReadableStream) return { bodyUnavailable: "ReadableStream" };
 	return { bodyText: String(body) };
 }
 
-function snapshotBytes(bytes: Uint8Array, contentType: string | null): RequestDebugBody {
+function snapshotBytes(
+	bytes: Uint8Array,
+	contentType: string | null,
+	contentEncoding: string | null,
+): RequestDebugBody {
 	try {
-		return snapshotText(utf8Decoder.decode(bytes), contentType);
+		// Dump what the server decodes, not the compressed wire bytes; the
+		// recorded `content-encoding` header still shows how it was sent.
+		return snapshotText(utf8Decoder.decode(decodeRequestBodyBytes(bytes, contentEncoding)), contentType);
 	} catch {
 		return { bodyBase64: Buffer.from(bytes).toString("base64") };
 	}

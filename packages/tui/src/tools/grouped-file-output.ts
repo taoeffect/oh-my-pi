@@ -315,8 +315,12 @@ export interface NumberedLine {
  * of consecutive line numbers (`start` = the run's first line, match lines
  * `mark`ed), with a `…` row wherever the numbers jump or an elision marker
  * (`n: null`) sits. No path header: the row or head above names the file.
+ * `wrap` soft-wraps long lines instead of scrolling the block sideways.
  */
-export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: string } = {}): NativeNode[] {
+export function numberedCode(
+	lines: readonly NumberedLine[],
+	opts: { lang?: string; wrap?: boolean } = {},
+): NativeNode[] {
 	const out: NativeNode[] = [];
 	let run: { start: number; text: string[]; marks: { line: number; tone: TspTone }[] } | undefined;
 	const flush = () => {
@@ -329,6 +333,7 @@ export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: stri
 					start: run.start,
 					numbers: true,
 					lang: opts.lang,
+					wrap: opts.wrap,
 					marks: run.marks.length > 0 ? run.marks : undefined,
 				}),
 				`c${run.start}`,

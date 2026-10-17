@@ -54,6 +54,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	} else {
 		delete model.contextWindowAuthoritative;
 	}
+	if (catalog.longContextWindowUncapped === true) {
+		model.longContextWindowUncapped = true;
+	} else {
+		delete model.longContextWindowUncapped;
+	}
 	const webSearch = catalog.webSearch;
 	if (
 		webSearch === "gemini" ||
@@ -114,6 +119,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 		model.requiresCursorToolSchemaProjection = true;
 	} else {
 		delete model.requiresCursorToolSchemaProjection;
+	}
+	if (catalog.toolSchemasInContext === false) {
+		model.toolSchemasInContext = false;
+	} else {
+		delete model.toolSchemasInContext;
 	}
 	const requiresToolResultImageHoisting = catalog.requiresToolResultImageHoisting;
 	if (requiresToolResultImageHoisting === true) {
@@ -324,6 +334,14 @@ export function applyCatalogCorrections(
 		if (contextWindow !== undefined) model.contextWindow = contextWindow;
 		const maxTokens = numberField(limitsPatch, "maxTokens");
 		if (maxTokens !== undefined) model.maxTokens = maxTokens;
+	}
+	const maxTokensFallback = catalog.maxTokensFallback;
+	if (typeof maxTokensFallback === "number" && model.maxTokens === null) {
+		model.maxTokens = maxTokensFallback;
+	}
+	const maxTokensCeiling = catalog.maxTokensCeiling;
+	if (typeof maxTokensCeiling === "number" && model.maxTokens !== null && model.maxTokens > maxTokensCeiling) {
+		model.maxTokens = maxTokensCeiling;
 	}
 	const contextWindowFloor = catalog.contextWindowFloor;
 	if (typeof contextWindowFloor === "number") {

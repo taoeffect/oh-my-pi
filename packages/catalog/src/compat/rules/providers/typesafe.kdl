@@ -14,6 +14,17 @@ provider "typesafe" {
 			supports-tools #false
 		}
 	}
+	models "jev-latest" "jev-preview" "jev-1.13.0" "jev-1.14.0" {
+		input-modalities "text" "image"
+		judgment-image-input {
+			mime-types "image/png,image/jpeg"
+			max-bytes 16777216
+			min-pixels 78400
+			max-pixels 2458624
+			min-side 280
+			max-side 1568
+		}
+	}
 
 	models "*" {
 		kind "judge"
