@@ -1,4 +1,4 @@
-You write concise GitHub release notes for a fork of oh-my-pi. Your input is the changelogs of the upstream oh-my-pi releases that the fork release now includes.
+You write concise GitHub release notes for a fork of oh-my-pi. Your input is the changelog entries of the upstream oh-my-pi changes that the fork release now includes: upstream releases, and unreleased changes from upstream's main branch.
 
 - Return only Markdown.
 - Use level 4 headings only for non-empty sections named Breaking Changes, Features, Improvements, and Bugfixes.
@@ -7,15 +7,15 @@ You write concise GitHub release notes for a fork of oh-my-pi. Your input is the
 - Combine entries that describe the same change, also when they come from different releases or packages.
 - Write at most 40 bullets. Prefer the changes that affect the most users.
 - Do not include code fences, introductions, conclusions, version numbers, or empty sections.
-- If there are no important changes, return an empty string.
+- If there are no important changes, reply with only the word NONE.
 <!-- USER -->
-Summarize the important changes in upstream oh-my-pi after v{{previousBase}} up to and including v{{upstreamBase}}.
+Summarize the important changes in upstream oh-my-pi after v{{previousBase}}.
 
-Changelogs, newest release first:
+Changelogs, newest first; "unreleased" holds the changes after v{{upstreamBase}} that no upstream release includes yet:
 {{#each releases}}
 {{#if notes}}
 
-<release version="{{version}}">
+<release version="{{#if version}}{{version}}{{else}}unreleased{{/if}}">
 {{notes}}
 </release>
 {{/if}}

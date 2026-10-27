@@ -312,7 +312,8 @@ jobs:
          VERSION: ${{ needs.metadata.outputs.version }}
       steps:
          # Full history and tags: release-notes.ts finds the previous fork release
-         # and reads the commits and upstream changelog sections since then.
+         # and reads the commits and upstream changelog sections since then. It
+         # also fetches upstream main to tell upstream commits from fork commits.
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
            with:
               persist-credentials: false

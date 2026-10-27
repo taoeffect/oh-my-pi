@@ -3,10 +3,13 @@
  * Writes GitHub release notes for a fork release tag with a Z.ai model
  * (port of the inline release-notes step of the Crush fork's release workflow).
  *
- * The fork part comes from the commits since the previous fork release, without
- * the commits that the upstream base release already contains. The upstream
- * part summarizes the changelogs of every upstream release since the previous
- * fork release's base and links each of those releases.
+ * Commits on upstream oh-my-pi's `main` and the fork's merges of `main` are
+ * upstream changes, conflict fixes included. The fork part comes from the other
+ * commits since the previous fork release. The upstream part summarizes the
+ * changelog entries that are new since the previous fork release: the sections
+ * of every upstream release since the previous release's base, and the
+ * unreleased entries that merges of `main` brought in, without the entries that
+ * fork commits added. It also links each of those upstream releases.
  */
 import * as path from "node:path";
 import { parseArgs } from "node:util";
@@ -27,6 +30,7 @@ import upstreamNotesPrompt from "./release-notes-upstream-prompt.md" with { type
 
 const ZAI_CHAT_COMPLETIONS_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions";
 const UPSTREAM_REPOSITORY = "can1357/oh-my-pi";
+const UPSTREAM_URL = `https://github.com/${UPSTREAM_REPOSITORY}.git`;
 const USER_SEPARATOR = "<!-- USER -->";
 const COMMIT_SEPARATOR = "\n---END COMMIT---\n";
 const MAX_COMMITS = 500;
@@ -50,10 +54,13 @@ authenticated gh for the GitHub release lookup in --repo (default: ${FORK_REPOSI
 The previous release is the newest GitHub release of --repo whose tag is an
 ancestor of <tag>; with none, the notes cover everything since the upstream base.
 Only when gh cannot list the releases, the newest merged v*-taoeffect.* tag is
-used instead. Commits that the upstream base tag v<upstream> contains are left
-out; the script fetches that tag from ${UPSTREAM_REPOSITORY} when the clone lacks it.
+used instead. The script fetches main from ${UPSTREAM_REPOSITORY}, and the
+upstream base tag v<upstream> when the clone lacks it. Commits on that main and
+the fork's merges of it are upstream changes, so the fork notes leave them out.
 The upstream changes come from the packages/*/CHANGELOG.md files in <tag>: the
-sections of the versions after the previous release's base, up to v<upstream>.`;
+sections of the versions after the previous release's base, up to v<upstream>,
+and the [Unreleased] sections, without the entries that the previous release
+already had or that fork commits added.`;
 
 export interface TextBudget {
 	/** Longest entry; a longer one is cut and ends with "…". */
@@ -105,22 +112,28 @@ export interface PackageChangelog {
 }
 
 export interface UpstreamRelease {
-	version: string;
-	/** One `## <package>` part per package with entries for this version; empty when no package has any. */
+	/** Undefined for the `[Unreleased]` entries: changes after the upstream base that merges of `main` brought in. */
+	version?: string;
+	/** One `## <package>` part per package with entries for this release; empty when no package has any. */
 	notes: string;
 }
 
 /**
- * Returns every upstream release after `floorExclusive` up to and including
- * `targetInclusive` that has a changelog section, newest first.
+ * Returns the upstream changes in the fork release's `changelogs`, newest
+ * first: the `[Unreleased]` entries when there are any, then every upstream
+ * release after `floorExclusive` up to and including `targetInclusive` that
+ * has a changelog section. Entry lines whose trimmed text is in `excluded` are
+ * left out.
  */
 export function collectUpstreamReleases(
 	changelogs: readonly PackageChangelog[],
 	floorExclusive: UpstreamVersion,
 	targetInclusive: UpstreamVersion,
+	excluded: ReadonlySet<string>,
 ): UpstreamRelease[] {
+	const included = changelogs.map(({ name, content }) => ({ name, content: withoutEntries(content, excluded) }));
 	const versions = new Map<string, UpstreamVersion>();
-	for (const { content } of changelogs) {
+	for (const { content } of included) {
 		for (const { version } of enumerateChangelogVersions(content)) {
 			const parsed = parseUpstreamVersion(version);
 			if (
@@ -131,18 +144,61 @@ export function collectUpstreamReleases(
 			}
 		}
 	}
-	return [...versions.values()]
+	const releases: UpstreamRelease[] = [...versions.values()]
 		.sort((left, right) => compareUpstreamVersions(right, left))
 		.map(({ version }) => ({
 			version,
-			notes: changelogs
-				.map(({ name, content }) => {
-					const section = mergePackageSection(content, null, version);
-					return section && `## ${name}\n\n${section}`;
-				})
-				.filter(Boolean)
-				.join("\n\n"),
+			notes: packageNotes(included, content => mergePackageSection(content, null, version)),
 		}));
+	const unreleased = packageNotes(included, readUnreleasedSection);
+	return unreleased ? [{ notes: unreleased }, ...releases] : releases;
+}
+
+/** Puts each package's `section` under a `## <package>` heading; packages with an empty section are left out. */
+function packageNotes(changelogs: readonly PackageChangelog[], section: (content: string) => string): string {
+	return changelogs
+		.map(({ name, content }) => {
+			const notes = section(content);
+			return notes && `## ${name}\n\n${notes}`;
+		})
+		.filter(Boolean)
+		.join("\n\n");
+}
+
+/** Removes the entry lines whose trimmed text is in `excluded`; headings and blank lines stay. */
+function withoutEntries(content: string, excluded: ReadonlySet<string>): string {
+	return content
+		.split("\n")
+		.filter(line => {
+			const entry = line.trim();
+			return !entry || line.startsWith("#") || !excluded.has(entry);
+		})
+		.join("\n");
+}
+
+/** Returns the `## [Unreleased]` entries under their `###` headings, like mergePackageSection, or "" when there are none. */
+function readUnreleasedSection(content: string): string {
+	const lines = content.split("\n");
+	const start = lines.findIndex(line => line.startsWith("## [Unreleased]"));
+	if (start === -1) return "";
+	const end = lines.findIndex((line, index) => index > start && line.startsWith("## ["));
+	const groups: string[] = [];
+	let heading: string | undefined;
+	let entries: string[] = [];
+	const flush = () => {
+		if (heading && entries.length > 0) groups.push(`${heading}\n\n${entries.join("\n")}`);
+		entries = [];
+	};
+	for (const line of lines.slice(start + 1, end === -1 ? undefined : end)) {
+		if (line.startsWith("### ")) {
+			flush();
+			heading = line.trimEnd();
+		} else if (heading && line.trim()) {
+			entries.push(line);
+		}
+	}
+	flush();
+	return groups.join("\n\n");
 }
 
 function upstreamReleaseLink(version: string): string {
@@ -168,29 +224,34 @@ function formatReleaseNotes(options: {
 	forkNotes: string;
 	upstream: UpstreamChanges | undefined;
 	upstreamBase: string;
+	/** The newest upstream `main` commit in the release, when it is newer than the upstream base. */
+	upstreamHead: string | undefined;
 	model: string;
 }): string {
-	const { forkNotes, upstream, upstreamBase, model } = options;
+	const { forkNotes, upstream, upstreamBase, upstreamHead, model } = options;
+	const upstreamVersions = upstream?.releases.flatMap(release => release.version ?? []).reverse() ?? [];
 	const upstreamSection = upstream && [
 		`### Upstream changes since v${upstream.previousBase}`,
 		upstream.notes,
-		`Upstream release notes: ${upstream.releases
-			.map(release => upstreamReleaseLink(release.version))
-			.reverse()
-			.join(", ")}.`,
+		upstreamVersions.length > 0 &&
+			`Upstream release notes: ${upstreamVersions.map(version => upstreamReleaseLink(version)).join(", ")}.`,
 	];
+	const baseLink = upstreamReleaseLink(upstreamBase);
 	const sections = [
 		forkNotes && `### Fork changes\n\n${forkNotes}`,
 		...(upstreamSection ?? []),
-		`Based on upstream oh-my-pi ${upstreamReleaseLink(upstreamBase)}.`,
+		upstreamHead
+			? `Based on upstream oh-my-pi ${baseLink} and the later upstream main commits up to [${upstreamHead.slice(0, 10)}](https://github.com/${UPSTREAM_REPOSITORY}/commit/${upstreamHead}).`
+			: `Based on upstream oh-my-pi ${baseLink}.`,
 		`Release notes generated by ${model}.`,
 	];
 	return `${sections.filter(Boolean).join("\n\n")}\n`;
 }
 
 /**
- * Returns the release notes in a Z.ai chat-completion reply. Z.ai sends replies
- * that ended early (`sensitive`, `network_error`, …) with HTTP 200, so only
+ * Returns the release notes in a Z.ai chat-completion reply, or "" when the
+ * model replied `NONE` (no important changes). Z.ai sends replies that ended
+ * early (`sensitive`, `network_error`, …) with HTTP 200, so only
  * `finish_reason: "stop"` counts as complete.
  */
 export function readReleaseNotesReply(body: unknown): string {
@@ -204,10 +265,12 @@ export function readReleaseNotesReply(body: unknown): string {
 				: `Z.ai did not complete the release notes (finish_reason: ${choice?.finish_reason ?? "none"})`,
 		);
 	}
-	return (choice.message?.content ?? "")
+	const notes = (choice.message?.content ?? "")
 		.replace(/^```(?:markdown)?\s*/i, "")
 		.replace(/\s*```$/i, "")
 		.trim();
+	// The prompts ask for NONE: asked for an empty reply, models write placeholders like "_(empty string)_".
+	return notes === "NONE" ? "" : notes;
 }
 
 async function requestReleaseNotes(options: {
@@ -237,12 +300,12 @@ async function requestReleaseNotes(options: {
 	return readReleaseNotesReply(await response.json());
 }
 
-function git(args: readonly string[]) {
-	return $`git ${args}`.cwd(REPO_ROOT).quiet().nothrow();
+function git(args: readonly string[], cwd = REPO_ROOT) {
+	return $`git ${args}`.cwd(cwd).quiet().nothrow();
 }
 
-async function gitText(args: readonly string[]): Promise<string> {
-	const result = await git(args);
+async function gitText(args: readonly string[], cwd = REPO_ROOT): Promise<string> {
+	const result = await git(args, cwd);
 	if (result.exitCode !== 0) {
 		throw new Error(
 			`git ${args.join(" ")} failed with exit code ${result.exitCode}: ${result.stderr.toString().trim()}`,
@@ -253,6 +316,16 @@ async function gitText(args: readonly string[]): Promise<string> {
 
 async function hasTag(tag: string): Promise<boolean> {
 	return (await git(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`])).exitCode === 0;
+}
+
+async function isAncestor(commit: string, descendant: string, cwd = REPO_ROOT): Promise<boolean> {
+	const result = await git(["merge-base", "--is-ancestor", commit, descendant], cwd);
+	if (result.exitCode > 1) {
+		throw new Error(
+			`git merge-base --is-ancestor ${commit} ${descendant} failed: ${result.stderr.toString().trim()}`,
+		);
+	}
+	return result.exitCode === 0;
 }
 
 function isForkReleaseTag(tag: string): boolean {
@@ -273,8 +346,7 @@ async function findPreviousRelease(tag: string, repo: string): Promise<string | 
 	if (releases !== undefined && !(releases instanceof type.errors)) {
 		for (const { tagName } of releases) {
 			if (tagName === tag || !isForkReleaseTag(tagName) || !(await hasTag(tagName))) continue;
-			const ancestor = await git(["merge-base", "--is-ancestor", `refs/tags/${tagName}`, `refs/tags/${tag}`]);
-			if (ancestor.exitCode === 0) return tagName;
+			if (await isAncestor(`refs/tags/${tagName}`, `refs/tags/${tag}`)) return tagName;
 		}
 		return undefined;
 	}
@@ -292,15 +364,78 @@ async function findPreviousRelease(tag: string, repo: string): Promise<string | 
 	return mergedTags.split("\n").find(candidate => candidate !== tag && isForkReleaseTag(candidate));
 }
 
-async function readCommitLog(tag: string, excludedTags: readonly string[]): Promise<BoundedEntries> {
-	const range = [`refs/tags/${tag}`, ...excludedTags.map(excluded => `^refs/tags/${excluded}`)];
-	const total = Number((await gitText(["rev-list", "--count", ...range])).trim());
-	const log = await gitText(["log", "-z", "--format=%B", `--max-count=${MAX_COMMITS}`, ...range]);
+/** Fetches upstream oh-my-pi's `main` and returns its commit. */
+async function fetchUpstreamMain(): Promise<string> {
+	console.log(`Fetching main from ${UPSTREAM_REPOSITORY}`);
+	await gitText(["fetch", "--no-tags", UPSTREAM_URL, "refs/heads/main"]);
+	return (await gitText(["rev-parse", "--verify", "FETCH_HEAD^{commit}"])).trim();
+}
+
+/**
+ * Returns the fork's own commits in the revision `range`, newest first. The
+ * commits that `upstreamMain` contains are upstream changes. So are the fork's
+ * merges of upstream `main`: they bring upstream changes in, and their conflict
+ * fixes adapt those changes to the fork.
+ */
+export async function listForkCommits(
+	range: readonly string[],
+	upstreamMain: string,
+	cwd = REPO_ROOT,
+): Promise<string[]> {
+	const rows = nonEmptyLines(await gitText(["rev-list", "--parents", ...range, `^${upstreamMain}`], cwd));
+	const forkCommits: string[] = [];
+	for (const row of rows) {
+		const [commit, ...parents] = row.split(" ");
+		const mergesUpstream =
+			parents.length > 1 &&
+			(await Promise.all(parents.map(parent => isAncestor(parent, upstreamMain, cwd)))).some(Boolean);
+		if (!mergesUpstream) forkCommits.push(commit);
+	}
+	return forkCommits;
+}
+
+/**
+ * Returns the trimmed changelog lines that the fork's own commits in the
+ * revision `range` add. Merge commits are left out: what a merge of upstream
+ * `main` adds is an upstream change.
+ */
+export async function readForkChangelogAdditions(
+	range: readonly string[],
+	upstreamMain: string,
+	cwd = REPO_ROOT,
+): Promise<string[]> {
+	const patches = await gitText(
+		[
+			"log",
+			"--no-merges",
+			"--full-history",
+			"--patch",
+			"--unified=0",
+			"--no-color",
+			"--format=",
+			...range,
+			`^${upstreamMain}`,
+			"--",
+			"packages/*/CHANGELOG.md",
+		],
+		cwd,
+	);
+	return patches
+		.split("\n")
+		.filter(line => line.startsWith("+") && !line.startsWith("+++"))
+		.map(line => line.slice(1).trim())
+		.filter(Boolean);
+}
+
+async function readCommitMessages(commits: readonly string[]): Promise<BoundedEntries> {
+	const newest = commits.slice(0, MAX_COMMITS);
+	// `git log --no-walk` with no commits would show HEAD.
+	const log = newest.length > 0 ? await gitText(["log", "-z", "--format=%B", "--no-walk=unsorted", ...newest]) : "";
 	const messages = log
 		.split("\0")
 		.map(message => message.trim())
 		.filter(Boolean);
-	return keepNewestThatFit(messages, total, COMMIT_BUDGET);
+	return keepNewestThatFit(messages, commits.length, COMMIT_BUDGET);
 }
 
 function nonEmptyLines(text: string): string[] {
@@ -348,28 +483,40 @@ export async function generateReleaseNotes({ tag, repo, apiKey, model }: Release
 	const upstreamTag = `v${upstreamBase.version}`;
 	if (!(await hasTag(upstreamTag))) {
 		console.log(`Fetching ${upstreamTag} from ${UPSTREAM_REPOSITORY}`);
-		const upstreamUrl = `https://github.com/${UPSTREAM_REPOSITORY}.git`;
-		await gitText(["fetch", "--no-tags", upstreamUrl, `refs/tags/${upstreamTag}:refs/tags/${upstreamTag}`]);
+		await gitText(["fetch", "--no-tags", UPSTREAM_URL, `refs/tags/${upstreamTag}:refs/tags/${upstreamTag}`]);
 	}
+	const upstreamMain = await fetchUpstreamMain();
 	const previous = await findPreviousRelease(tag, repo);
-	const excludedTags = previous ? [previous, upstreamTag] : [upstreamTag];
-	console.log(`Release notes cover ${tag} without ${excludedTags.join(" and ")}`);
-	const commits = await readCommitLog(tag, excludedTags);
+	const range = previous ? [`refs/tags/${tag}`, `^refs/tags/${previous}`] : [`refs/tags/${tag}`];
+	console.log(`Fork notes cover ${tag} without ${previous ? `${previous}, ` : ""}upstream main, and merges of it`);
+	const commits = await readCommitMessages(await listForkCommits(range, upstreamMain));
 	if (commits.omitted > 0) console.log(`Left out the ${commits.omitted} oldest commits to bound the request size`);
 
-	// Without a previous fork release there is no older base to list upstream releases from.
-	const previousBase = previous ? parseReleaseVersion(previous.slice(1)).base : undefined;
-	const upstreamReleases = previousBase
-		? collectUpstreamReleases(await readChangelogsAt(tag), previousBase, upstreamBase)
-		: [];
+	// Upstream changes count from the previous release; without one, from the release's own upstream base.
+	const floorTag = previous ?? upstreamTag;
+	const floorBase = previous ? parseReleaseVersion(previous.slice(1)).base : upstreamBase;
+	const [releaseChangelogs, floorChangelogs, forkAdditions, upstreamHead, upstreamBaseCommit] = await Promise.all([
+		readChangelogsAt(tag),
+		readChangelogsAt(floorTag),
+		readForkChangelogAdditions(range, upstreamMain),
+		gitText(["merge-base", `refs/tags/${tag}`, upstreamMain]).then(text => text.trim()),
+		gitText(["rev-parse", `refs/tags/${upstreamTag}^{commit}`]).then(text => text.trim()),
+	]);
+	const excluded = new Set([
+		...floorChangelogs.flatMap(({ content }) => content.split("\n").map(line => line.trim())),
+		...forkAdditions,
+	]);
+	const upstreamReleases = collectUpstreamReleases(releaseChangelogs, floorBase, upstreamBase, excluded);
 	const upstreamChangelogs = keepNewestThatFit(
 		upstreamReleases.map(release => release.notes),
 		upstreamReleases.length,
 		UPSTREAM_BUDGET,
 	);
-	if (previousBase && upstreamReleases.length > 0) {
+	if (upstreamReleases.length > 0) {
+		const released = upstreamReleases.filter(release => release.version).length;
+		const unreleased = released < upstreamReleases.length ? ", and unreleased upstream changes" : "";
 		console.log(
-			`Upstream notes cover ${upstreamReleases.length} releases after v${previousBase.version} up to ${upstreamTag}`,
+			`Upstream notes cover ${released} releases after v${floorBase.version} up to ${upstreamTag}${unreleased}`,
 		);
 	}
 	if (upstreamChangelogs.omitted > 0) {
@@ -377,24 +524,27 @@ export async function generateReleaseNotes({ tag, repo, apiKey, model }: Release
 	}
 
 	const [forkNotes, upstreamNotes] = await Promise.all([
-		requestReleaseNotes({
-			apiKey,
-			model,
-			...renderPrompt(releaseNotesPrompt, {
-				tag,
-				previous,
-				upstreamTag,
-				npmPackage: await readNpmPackageNameAt(tag),
-				commits: commits.kept.join(COMMIT_SEPARATOR),
-				omitted: commits.omitted,
-			}),
-		}),
+		// With no fork commits, a request could only invent fork changes.
+		commits.kept.length > 0
+			? requestReleaseNotes({
+					apiKey,
+					model,
+					...renderPrompt(releaseNotesPrompt, {
+						tag,
+						previous,
+						upstreamTag,
+						npmPackage: await readNpmPackageNameAt(tag),
+						commits: commits.kept.join(COMMIT_SEPARATOR),
+						omitted: commits.omitted,
+					}),
+				})
+			: "",
 		upstreamReleases.some(release => release.notes)
 			? requestReleaseNotes({
 					apiKey,
 					model,
 					...renderPrompt(upstreamNotesPrompt, {
-						previousBase: previousBase?.version,
+						previousBase: floorBase.version,
 						upstreamBase: upstreamBase.version,
 						releases: upstreamChangelogs.kept.map((notes, index) => ({
 							version: upstreamReleases[index].version,
@@ -408,10 +558,11 @@ export async function generateReleaseNotes({ tag, repo, apiKey, model }: Release
 	return formatReleaseNotes({
 		forkNotes,
 		upstream:
-			previousBase && upstreamReleases.length > 0
-				? { previousBase: previousBase.version, releases: upstreamReleases, notes: upstreamNotes }
+			upstreamReleases.length > 0
+				? { previousBase: floorBase.version, releases: upstreamReleases, notes: upstreamNotes }
 				: undefined,
 		upstreamBase: upstreamBase.version,
+		upstreamHead: upstreamHead === upstreamBaseCommit ? undefined : upstreamHead,
 		model,
 	});
 }

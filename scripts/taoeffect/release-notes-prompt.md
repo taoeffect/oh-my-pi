@@ -6,7 +6,7 @@ You write concise GitHub release notes from git commit messages.
 - Mention only important user-visible changes. Omit chores, tests, docs, refactors, and CI unless they materially affect users.
 - Omit merges of upstream oh-my-pi: separate notes cover the upstream changes.
 - Do not include code fences, introductions, conclusions, or empty sections.
-- If there are no important changes, return an empty string.
+- If there are no important changes, reply with only the word NONE.
 <!-- USER -->
 Summarize important changes in {{tag}} since {{#if previous}}{{previous}}{{else}}upstream oh-my-pi {{upstreamTag}}{{/if}}.
 
