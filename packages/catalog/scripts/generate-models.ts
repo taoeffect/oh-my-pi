@@ -483,6 +483,7 @@ async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[
 		console.log("Fetching models from Antigravity API...");
 		const discovered = await fetchAntigravityDiscoveryModels({
 			token: access.accessToken,
+			projectId: access.projectId,
 			endpoint: ANTIGRAVITY_ENDPOINT,
 		});
 		if (discovered === null || discovered.rejectedStatus !== undefined) {

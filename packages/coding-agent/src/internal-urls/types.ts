@@ -14,6 +14,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
@@ -202,9 +203,8 @@ export interface InternalResource {
 	unbounded?: boolean;
 	/**
 	 * True when the resource is a directory listing rather than file content.
-	 * `search` refuses to grep such a resource when it has no `sourcePath` — a
-	 * remote `ssh://` listing has no local path to recurse, so its listing text
-	 * must never be mistaken for the directory's contents.
+	 * Traversal needs a `sourcePath`, enumerated leaves, or the handler's
+	 * `readDirectory` hook; the rendered listing is never searched as file text.
 	 */
 	isDirectory?: boolean;
 }
@@ -309,6 +309,8 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
+	/** Search walks may follow skill links only within the plugin root (or the local skill root). */
+	containSkillPaths?: boolean;
 	/**
 	 * Calling session's agent-scoped applicable rule set (rulebook + always-apply
 	 * + triggered TTSR rules, already bucketed by `agents` frontmatter). Prefer
@@ -325,9 +327,8 @@ export interface ResolveContext {
 	session?: ToolSession;
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory
-	 * listing (e.g. the ssh:// handler draining a full remote `ls`) instead return
-	 * the directory shape (`isDirectory: true`) with empty content. `search`/`find`
-	 * reject directory resources, so they never need the listing.
+	 * listing instead return the directory shape (`isDirectory: true`) with empty
+	 * content. Filesystem consumers list through `readDirectory` when needed.
 	 */
 	skipDirectoryListing?: boolean;
 }
@@ -421,6 +422,12 @@ export interface ProtocolHandler {
 	 * leaf documents for `grep`/`find`. Leaf `url`s must round-trip through `resolve`.
 	 */
 	enumerate?(url: InternalUrl, context?: ResolveContext): Promise<Array<{ url: string; content: string }>>;
+	/**
+	 * Immediate structured children of a remote/virtual directory, without
+	 * rendering listing text or materializing a local directory. Entry names
+	 * are raw basenames; the URL filesystem encodes them when traversing.
+	 */
+	readDirectory?(url: InternalUrl, context?: ResolveContext): Promise<ShellFsDirEntry[]>;
 	/**
 	 * One-line system-prompt entry (rendered from `prompts/internal-urls/<scheme>.md`)
 	 * when the scheme is usable in the session described by `host`; `undefined`

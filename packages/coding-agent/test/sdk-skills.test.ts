@@ -332,6 +332,56 @@ This skill is added after session creation.
 		}
 	});
 
+	it("learn hot-registers minted managed skills in the active session", async () => {
+		const originalAgentDir = getAgentDir();
+		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
+		setAgentDir(managedAgentDir);
+		const settings = Settings.isolated({
+			"skills.enabled": true,
+			"skills.enableCodexUser": false,
+			"skills.enableClaudeUser": false,
+			"skills.enableClaudeProject": false,
+			"skills.enablePiUser": false,
+			"skills.enablePiProject": true,
+			"autolearn.enabled": true,
+			"memory.backend": "local",
+		});
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: managedAgentDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings,
+		});
+
+		try {
+			const learn = session.getToolByName("learn");
+			expect(learn).toBeDefined();
+			await learn!.execute("learn-skill-create", {
+				memory: "Use learned-managed-skill immediately in the same session.",
+				skill: {
+					action: "create",
+					name: "learned-managed-skill",
+					description: "Minted by learn during the active session.",
+					body: "# Learned Managed Skill\n\nAvailable immediately via skill://.",
+				},
+			});
+
+			expect(session.skills.some(skill => skill.name === "learned-managed-skill")).toBe(true);
+			expect(getActiveSkills().some(skill => skill.name === "learned-managed-skill")).toBe(true);
+			expect(session.agent.state.systemPrompt.join("\n")).toContain("learned-managed-skill");
+			const readSkill = session.getToolByName("read");
+			expect(readSkill).toBeDefined();
+			const readResult = await readSkill!.execute("read-learned-skill", { path: "skill://learned-managed-skill" });
+			expect(
+				readResult.content.some(part => part.type === "text" && part.text.includes("# Learned Managed Skill")),
+			).toBe(true);
+		} finally {
+			await session.dispose();
+			setAgentDir(originalAgentDir);
+		}
+	});
+
 	it("should have empty skills when options.skills is empty array (--no-skills)", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,

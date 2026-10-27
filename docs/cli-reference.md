@@ -142,10 +142,13 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--no-tools` | Disable all built-in tools. |
 | `--no-lsp` | Disable LSP tools, formatting, and diagnostics. |
 | `--no-pty` | Disable PTY-based interactive bash execution. |
-| `--approval-mode <mode>` | Override `tools.approvalMode` for this session (`always-ask`, `write`, or `yolo`). See [approval mode](./approval-mode.md). |
+| `--approval-mode <mode>` | Override `tools.approvalMode` for this session (`always-ask`, `always-ask-cached`, `write`, or `yolo`). See [approval mode](./approval-mode.md). |
 | `--auto-approve`, `--yolo` | Force yolo tier approval; explicit tool/user policies and provider safety checks still apply. |
 | `--advisor` | Enable the advisor runtime (passively reviews each turn and injects notes). See [advisor / watchdog](./advisor-watchdog.md). |
+| `--wait-async` | Print mode: before exiting, wait for this run's background jobs and start another turn in the same session with each result (`async.printWake`). See [Headless / print mode](#headless--print-mode). |
 | `--max-time <duration>` | Stop the session after this duration (e.g. `600`, `10m`, `1h`). |
+| `--warn-cost <usd>` | Warn once when the session's spend, subagents included, reaches this many USD. Overrides `session.warnCost`. |
+| `--max-cost <usd>` | Stop sending model requests once the session's spend reaches this many USD; a request already in flight can carry spend past it. Overrides `session.maxCost`. |
 
 #### Extensions, hooks, skills, and rules
 
@@ -159,6 +162,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--skills <globs>` | Comma-separated glob patterns to filter [skills](./skills.md) (e.g. `git-*,docker`). |
 | `--no-skills` | Disable skills discovery and loading. |
 | `--no-rules` | Disable rules discovery and loading. See [context files](./context-files.md). |
+| `--no-context-files` | Disable [context files](./context-files.md) (`AGENTS.md`, `CLAUDE.md`, ...) for the working directory and every `--add-dir` root. Subagents inherit it. |
 
 #### System prompt
 
@@ -210,11 +214,29 @@ Related flags for headless runs:
 - `--mode json` — emit structured events instead of rendered text.
 - `--no-title` — skip title auto-generation (also `PI_NO_TITLE`).
 - `--max-time <duration>` — bound the run.
+- `--wait-async` — keep the run alive for its background jobs (below).
+- `--warn-cost <usd>` / `--max-cost <usd>` — warn at, or stop sending model requests from, a spend.
+
+Print mode is single-shot by default: once its prompts are answered it disposes
+the session, which cancels background jobs the run started (`bash` or `task`
+calls the model ran asynchronously). With `--wait-async` (or
+`async.printWake: true`) it instead waits for them; each job's result is
+delivered to the same session as it is in the TUI, starting another turn, and a
+turn may start further jobs. The run exits once no owned job or undelivered
+result remains, and text mode prints the answer of the last turn. Bound
+unattended runs with `--max-time`.
+
+```sh
+# Start a long build in the background, then react to its result in the same session
+omp -p --wait-async --max-time 2h "Run the integration suite in the background and fix what fails"
+```
 
 `--mode json` emits a session header followed by events as JSON lines.
 Incremental `message_update` events omit full partial-message snapshots; completed
 messages arrive in `message_end`, and opaque provider replay payloads are omitted.
 Terminal turn failures produce a nonzero exit status in both text and JSON modes.
+A run stopped by `--max-cost` exits with status `3`: the cap message goes to
+stderr (a `cost-gate` notice in JSON mode) and no answer is printed.
 
 `plan.defaultOnStartup` is ignored in print mode because there is no plan-review
 UI. Use `--plan-yolo` for unattended planning and implementation.
@@ -296,3 +318,19 @@ Run `omp <command> --help` for each command's own flags and examples.
 > `packages/coding-agent/src/cli-commands.ts`.
 
 `__complete` is an internal, hidden subcommand used by shell completion scripts.
+
+### Worktree clones
+
+When `worktree.clone` is enabled, `omp worktree add` and other clone-first
+worktree callers carry relocatable ignored caches such as `node_modules`.
+Directories containing `pyvenv.cfg` or `CMakeCache.txt` are not carried, even
+when they are nested or ignore themselves. Recreate Python environments and
+CMake build trees in the new worktree so their absolute paths name the new
+checkout. Tracked files inside excluded directories are restored from Git;
+when keeping changes, their live source contents and staged state are preserved.
+
+Clean clones also discard carried files that are untracked under the target
+commit's own ignore rules, after its tree and index have been written. Caches
+ignored by the target remain, even if the source did not ignore them. Nested
+repositories are preserved and symlinks are not followed. This target-ignore
+cleanup is skipped when keeping the source's uncommitted changes.

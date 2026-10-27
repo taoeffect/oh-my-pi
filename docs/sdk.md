@@ -277,6 +277,10 @@ Related APIs:
 
 `deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. The one exception is a running interruptible `wait` or `vibe_wait`, which an aside ends so the message is not delayed behind it. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
 
+## Idle maintenance
+
+A session starts no autonomous idle work until its owner opts in with `session.enableIdleMaintenance({ isBlocked?, scheduledTurn?, onRecap? })`; the interactive TUI does, SDK, RPC and print sessions do not. After a turn whose last message is a generated assistant reply (text, thinking or a tool call, even if the turn was then aborted), once nothing is live, admitted, queued or scheduled, the session generates the idle recap (`recap.*` settings), journals it in the history database and passes the full nonblank reply to `onRecap`; the recap never enters the transcript or model context. Idle compaction (`compaction.idle*` settings) also waits until no background job or delivery can wake the session. `isBlocked` says the owner wants no autonomous work (a draft being composed, a view that left, startup unfinished); `scheduledTurn` says the owner has decided to start a turn it has not yet admitted. Call `session.refreshIdleMaintenance()` when either answer changes: work that is no longer wanted is dropped and what the stretch still owes is re-armed with a fresh delay. Repeated activation keeps the first owner's options; session disposal owns cleanup.
+
 ## `AgentSession` lifecycle and disposal
 
 Call `await session.dispose()` when the embedder is completely done with a session. `dispose()` starts disposal itself and is idempotent: repeated or concurrent calls receive the same teardown promise, so shutdown events and owned resources are not drained twice.

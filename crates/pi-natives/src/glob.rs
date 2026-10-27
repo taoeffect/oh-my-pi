@@ -39,6 +39,9 @@ pub struct GlobOptions<'env> {
 	pub file_type:            Option<FileType>,
 	/// Match simple patterns recursively by default (`*.ts` -> recursive).
 	pub recursive:            Option<bool>,
+	/// Follow descendant symbolic links with cycle detection (default: false).
+	/// The filesystem provider is responsible for enforcing mount containment.
+	pub follow_links:         Option<bool>,
 	/// Include hidden files (default: false).
 	pub hidden:               Option<bool>,
 	/// Maximum number of results to return.
@@ -77,6 +80,7 @@ struct GlobConfig {
 	root:                  PathBuf,
 	pattern:               String,
 	recursive:             bool,
+	follow_links:          bool,
 	include_hidden:        bool,
 	file_type_filter:      Option<FileType>,
 	max_results:           usize,
@@ -96,43 +100,43 @@ fn compare_matches_by_rank(a: &GlobMatch, b: &GlobMatch) -> Ordering {
 		.then_with(|| a.path.cmp(&b.path))
 }
 
-fn resolve_symlink_target_type(fs: &BlockingFs, target_path: PathBuf) -> Option<FileType> {
-	let metadata = fs.metadata(target_path).ok()?;
-	if metadata.is_dir() {
-		Some(FileType::Dir)
-	} else if metadata.is_file() {
-		Some(FileType::File)
-	} else {
-		None
-	}
-}
-
 fn apply_file_type_filter(
-	entry: &pi_walker::CollectedEntry,
+	entry: pi_walker::CollectedEntry,
 	config: &GlobConfig,
-) -> Option<FileType> {
+) -> Option<GlobMatch> {
 	let file_type = iofs::from_walker_file_type(entry.file_type);
 	let Some(filter) = config.file_type_filter else {
-		return Some(file_type);
+		return Some(GlobMatch::from(entry));
 	};
 	if file_type == filter {
-		return Some(file_type);
+		return Some(GlobMatch::from(entry));
 	}
 	if file_type != FileType::Symlink {
 		return None;
 	}
-	match filter {
-		FileType::File | FileType::Dir => {
-			let resolved =
-				resolve_symlink_target_type(&config.filesystem, entry.absolute_path(&config.root))?;
-			if resolved == filter {
-				Some(resolved)
-			} else {
-				None
-			}
-		},
-		FileType::Symlink => None,
+	let metadata = config
+		.filesystem
+		.metadata(entry.absolute_path(&config.root))
+		.ok()?;
+	let resolved = if metadata.is_dir() {
+		FileType::Dir
+	} else if metadata.is_file() {
+		FileType::File
+	} else {
+		return None;
+	};
+	if resolved != filter {
+		return None;
 	}
+	let mut matched = GlobMatch::from(entry);
+	matched.file_type = resolved;
+	matched.size = (resolved == FileType::File).then(|| metadata.len() as f64);
+	matched.mtime = metadata
+		.modified()
+		.ok()
+		.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+		.map(|duration| duration.as_millis() as f64);
+	Some(matched)
 }
 
 fn collect_ranked_matches(
@@ -161,11 +165,9 @@ fn collect_native_filtered_matches(
 	let mut collected = Vec::new();
 	for entry in outcome.entries {
 		ct.heartbeat()?;
-		let Some(effective_file_type) = apply_file_type_filter(&entry, config) else {
+		let Some(matched_entry) = apply_file_type_filter(entry, config) else {
 			continue;
 		};
-		let mut matched_entry = GlobMatch::from(entry);
-		matched_entry.file_type = effective_file_type;
 		collected.push(matched_entry);
 		if !config.sort_by_mtime && collected.len() >= config.max_results {
 			break;
@@ -202,7 +204,11 @@ fn run_glob(
 		.gitignore(config.use_gitignore)
 		.skip_git(true)
 		.skip_node_modules(!config.mentions_node_modules)
-		.follow_links(pi_walker::FollowLinks::Never)
+		.follow_links(if config.follow_links {
+			pi_walker::FollowLinks::Always
+		} else {
+			pi_walker::FollowLinks::Never
+		})
 		.detail(scan_detail)
 		.order(pi_walker::WalkOrder::Path)
 		.emit_root(false)
@@ -274,6 +280,7 @@ pub fn glob<'env>(
 		path,
 		file_type,
 		recursive,
+		follow_links,
 		hidden,
 		max_results,
 		gitignore,
@@ -300,6 +307,7 @@ pub fn glob<'env>(
 				include_hidden: hidden.unwrap_or(false),
 				file_type_filter: file_type,
 				recursive: recursive.unwrap_or(true),
+				follow_links: follow_links.unwrap_or(false),
 				max_results: max_results.map_or(usize::MAX, |value| value as usize),
 				use_gitignore: gitignore.unwrap_or(true),
 				mentions_node_modules: include_node_modules
@@ -376,6 +384,7 @@ mod tests {
 				root:                  root.path().to_path_buf(),
 				pattern:               "*.rs".to_string(),
 				recursive:             true,
+				follow_links:          false,
 				include_hidden:        false,
 				file_type_filter:      Some(super::FileType::File),
 				max_results:           usize::MAX,
@@ -420,6 +429,7 @@ mod tests {
 					root:                  root.path().to_path_buf(),
 					pattern:               pattern.to_string(),
 					recursive:             false,
+					follow_links:          false,
 					include_hidden:        true,
 					file_type_filter:      None,
 					max_results:           100,
@@ -469,6 +479,7 @@ mod tests {
 					root: root.clone(),
 					pattern: pattern.to_string(),
 					recursive: true,
+					follow_links: false,
 					include_hidden: false,
 					file_type_filter,
 					max_results: usize::MAX,
@@ -491,6 +502,90 @@ mod tests {
 
 		assert_eq!(run("*.rs", None), ["a b.rs", "a.rs", "sub/b.rs"]);
 		assert_eq!(run("*", Some(super::FileType::Dir)), ["sub"]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn run_glob_follows_descendant_links_only_when_requested_and_stops_cycles() {
+		let root = TempDirGuard::new();
+		fs::create_dir_all(root.path().join("scope")).expect("create scope");
+		fs::create_dir_all(root.path().join("shared/nested")).expect("create shared directory");
+		fs::write(root.path().join("shared/nested/sequence.py"), "pass\n").expect("write source");
+		std::os::unix::fs::symlink(root.path().join("shared"), root.path().join("scope/link"))
+			.expect("link shared directory");
+		std::os::unix::fs::symlink(root.path().join("scope"), root.path().join("shared/cycle"))
+			.expect("link ancestor cycle");
+		let run = |follow_links| {
+			super::run_glob(
+				super::GlobConfig {
+					filesystem: BlockingFs::native(),
+					root: root.path().join("scope"),
+					pattern: "**/*.py".to_string(),
+					recursive: false,
+					follow_links,
+					include_hidden: false,
+					file_type_filter: Some(super::FileType::File),
+					max_results: usize::MAX,
+					use_gitignore: false,
+					mentions_node_modules: false,
+					sort_by_mtime: true,
+					cache: false,
+				},
+				None,
+				crate::task::CancelToken::default(),
+			)
+			.expect("glob succeeds")
+		};
+		assert!(run(false).matches.is_empty());
+		assert_eq!(match_paths(&run(true)), ["link/nested/sequence.py"]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn file_filtered_symlinks_keep_target_metadata_and_exclude_dangling_links() {
+		let root = TempDirGuard::new();
+		fs::create_dir(root.path().join("scope")).expect("create scope");
+		let target = root.path().join("target.ts");
+		fs::write(&target, "source\n").expect("write source");
+		fs::File::open(&target)
+			.expect("open source")
+			.set_times(
+				fs::FileTimes::new()
+					.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000)),
+			)
+			.expect("set target mtime");
+		std::os::unix::fs::symlink(&target, root.path().join("scope/source.ts"))
+			.expect("link source");
+		std::os::unix::fs::symlink(
+			root.path().join("missing"),
+			root.path().join("scope/dangling.ts"),
+		)
+		.expect("create dangling link");
+
+		for sort_by_mtime in [false, true] {
+			let result = super::run_glob(
+				super::GlobConfig {
+					filesystem: BlockingFs::native(),
+					root: root.path().join("scope"),
+					pattern: "*".to_string(),
+					recursive: false,
+					follow_links: false,
+					include_hidden: false,
+					file_type_filter: Some(super::FileType::File),
+					max_results: usize::MAX,
+					use_gitignore: false,
+					mentions_node_modules: false,
+					sort_by_mtime,
+					cache: false,
+				},
+				None,
+				crate::task::CancelToken::default(),
+			)
+			.expect("glob succeeds");
+			assert_eq!(match_paths(&result), ["source.ts"]);
+			assert_eq!(result.matches[0].size, Some(7.0));
+			assert_eq!(result.matches[0].mtime, Some(1_600_000_000_000.0));
+		}
 	}
 
 	#[cfg(unix)]

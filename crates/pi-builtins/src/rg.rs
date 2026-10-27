@@ -26,7 +26,8 @@ use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
 use crate::grep::{
-	CompiledMatcher, RecordFormat, exit_status, for_each_nonempty_match, pcre2_jit_enabled,
+	BoundedSearchReader, CompiledMatcher, RecordFormat, SEARCH_HEAP_LIMIT, describe_search_error,
+	exit_status, for_each_nonempty_match, pcre2_jit_enabled, read_pattern_source,
 };
 use crate::host::{Host, StreamWriter, Utility, forward_slash_display};
 
@@ -346,6 +347,14 @@ pub(crate) struct Rg {
 	#[arg(long = "count-matches")]
 	count_matches: bool,
 
+	/// With -c/--count-matches, also print files with zero matches.
+	#[arg(long = "include-zero", overrides_with = "no_include_zero")]
+	include_zero: bool,
+
+	/// Print counts only for files with matches.
+	#[arg(long = "no-include-zero", overrides_with = "include_zero", hide = true)]
+	no_include_zero: bool,
+
 	/// Print only matching spans.
 	#[arg(short = 'o', long = "only-matching")]
 	only_matching: bool,
@@ -501,6 +510,7 @@ struct SearchOptions {
 	byte_offset:         bool,
 	count:               bool,
 	count_matches:       bool,
+	include_zero:        bool,
 	files_with_matches:  bool,
 	files_without_match: bool,
 	only_matching:       bool,
@@ -749,7 +759,9 @@ impl<M: Matcher, W: Write> Sink for RgSink<'_, M, W> {
 			} else {
 				self.line_count
 			};
-			self.opts.record.write_count_record(self.out, self.display, count)?;
+			if count > 0 || self.opts.include_zero {
+				self.opts.record.write_count_record(self.out, self.display, count)?;
+			}
 		}
 		Ok(())
 	}
@@ -905,7 +917,8 @@ fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Se
 		.binary_detection(binary_detection(cli, mode))
 		.max_matches(cli.max_count)
 		.encoding(encoding)
-		.bom_sniffing(bom_sniffing);
+		.bom_sniffing(bom_sniffing)
+		.heap_limit(Some(SEARCH_HEAP_LIMIT));
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
 	} else if cli.crlf && !cli.no_crlf {
@@ -915,18 +928,18 @@ fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Se
 }
 
 fn read_pattern_file(host: &mut Host, path: &OsStr) -> Result<Vec<String>, String> {
-	let mut text = String::new();
-	if path == OsStr::new("-") {
-		host.stdin
-			.read_to_string(&mut text)
-			.map_err(|err| format!("rg: -: {err}"))?;
+	let bytes = if path == OsStr::new("-") {
+		read_pattern_source(&mut host.stdin)
 	} else {
-		let resolved = host.resolve(path);
-		text = host
-			.fs()
-			.read_to_string(&resolved)
-			.map_err(|err| format!("rg: {}: {err}", path.to_string_lossy()))?;
-	}
+		host.fs().open(host.resolve(path)).and_then(read_pattern_source)
+	};
+	let text = bytes
+		.and_then(|bytes| {
+			String::from_utf8(bytes).map_err(|_| {
+				io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8")
+			})
+		})
+		.map_err(|err| format!("rg: {}: {err}", path.to_string_lossy()))?;
 	Ok(text
 		.lines()
 		.map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
@@ -962,6 +975,7 @@ fn search_options(cli: &Rg) -> SearchOptions {
 		byte_offset: cli.byte_offset,
 		count: cli.count && !count_matches,
 		count_matches,
+		include_zero: cli.include_zero,
 		files_with_matches: cli.files_with_matches && !cli.files_without_match,
 		files_without_match: cli.files_without_match,
 		only_matching: cli.only_matching,
@@ -1169,7 +1183,13 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 		.gitignore(!no_ignore)
 		.skip_git(!no_ignore)
 		.skip_node_modules(false)
-		.follow_links(pi_walker::FollowLinks::from(cli.follow && !cli.no_follow))
+		// ripgrep always follows a path operand that is itself a symlink (even with
+		// `--no-follow`); `-L` extends that to links found during the walk.
+		.follow_links(if cli.follow && !cli.no_follow {
+			pi_walker::FollowLinks::Always
+		} else {
+			pi_walker::FollowLinks::Roots
+		})
 		.detail(if filters.max_filesize.is_some() {
 			pi_walker::WalkDetail::Full
 		} else {
@@ -1210,6 +1230,7 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<bool> {
+	let reader = BoundedSearchReader::new(reader, searcher, matcher);
 	if opts.json {
 		let mut builder = JSONBuilder::new();
 		builder.replacement(opts.replacement.clone());
@@ -1287,10 +1308,13 @@ fn process_file<M: Matcher, W: Write>(
 	match result {
 		Ok(any_match) => Ok(SearchOutcome { any_match, had_error: false }),
 		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
-		Err(error) => Ok(SearchOutcome {
-			any_match: false,
-			had_error: report_path_error(host, display, path, error, opts),
-		}),
+		Err(error) => {
+			let message = describe_search_error(&error);
+			Ok(SearchOutcome {
+				any_match: false,
+				had_error: report_path_error(host, display, path, &message, opts),
+			})
+		},
 	}
 }
 
@@ -1362,7 +1386,7 @@ fn report_path_error(
 	host: &mut Host,
 	display: Option<&[u8]>,
 	fallback: &Path,
-	err: io::Error,
+	err: &str,
 	opts: &SearchOptions,
 ) -> bool {
 	if !opts.no_messages {
@@ -1728,7 +1752,7 @@ fn execute_search<M: Matcher, W: Write>(
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
-						let _ = writeln!(host.stderr, "rg: <stdin>: {error}");
+						let _ = writeln!(host.stderr, "rg: <stdin>: {}", describe_search_error(&error));
 					}
 				},
 			}
@@ -1908,6 +1932,8 @@ impl Utility for Rg {
 mod tests {
 	use super::*;
 	use crate::host::{Host, run_util};
+	#[cfg(unix)]
+	use crate::host::tree_with_sparse_file;
 
 	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Rg>(args, stdin, "/");
@@ -1928,6 +1954,23 @@ mod tests {
 		let (code, out, err) = run(&["--crlf", "-c", "x$", "-"], "ax\r\nbx\nc\r\n");
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n");
+	}
+
+	#[test]
+	fn count_skips_files_without_matches_unless_include_zero() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("a"), "hit\nhit\n").unwrap();
+		std::fs::write(tree.path().join("b"), "miss\n").unwrap();
+		let count = |args: &[&str]| {
+			let (code, capture) = run_util::<Rg>(args, "", tree.path());
+			(code, capture.out())
+		};
+
+		assert_eq!(count(&["-c", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["--count-matches", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["-c", "hit", "b"]), (1, String::new()));
+		assert_eq!(count(&["-c", "--include-zero", "hit", "a", "b"]), (0, "a:2\nb:0\n".to_owned()));
+		assert_eq!(count(&["-c", "--include-zero", "--no-include-zero", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
 	}
 
 	#[test]
@@ -1963,6 +2006,35 @@ mod tests {
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(capture.out().contains("keep.txt:hit\n"));
 		assert!(!capture.out().contains("skip.txt"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn follows_a_symlinked_root_operand_but_not_nested_links() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tree.path().join("real/sub")).unwrap();
+		std::fs::write(tree.path().join("real/a.txt"), "hit\n").unwrap();
+		std::fs::write(tree.path().join("real/sub/b.txt"), "hit\n").unwrap();
+		std::os::unix::fs::symlink("real", tree.path().join("link")).unwrap();
+		std::fs::create_dir(tree.path().join("parent")).unwrap();
+		std::os::unix::fs::symlink("../real", tree.path().join("parent/inner")).unwrap();
+		let files = |args: &[&str]| {
+			let (code, capture) = run_util::<Rg>(args, "", tree.path());
+			let mut lines: Vec<String> = capture.out().lines().map(str::to_owned).collect();
+			lines.sort();
+			(code, lines)
+		};
+
+		let linked = (0, vec!["link/a.txt".to_owned(), "link/sub/b.txt".to_owned()]);
+		assert_eq!(files(&["-l", "hit", "link"]), linked);
+		assert_eq!(files(&["-l", "--no-follow", "hit", "link"]), linked);
+		assert_eq!(files(&["--files", "link"]), linked);
+		// Links met during the walk stay unfollowed unless -L asks for them.
+		assert_eq!(files(&["-l", "hit", "parent"]), (1, Vec::new()));
+		assert_eq!(
+			files(&["-l", "-L", "hit", "parent"]),
+			(0, vec!["parent/inner/a.txt".to_owned(), "parent/inner/sub/b.txt".to_owned()])
+		);
 	}
 
 	#[test]
@@ -2115,6 +2187,62 @@ mod tests {
 			run_util::<Rg>(&["--path-separator", "::", "hit", "."], "", tree.path());
 		assert_eq!(code, 2);
 		assert!(capture.err().contains("exactly one byte"));
+		// An explicit operand is printed as spelled (`-H`: a lone file operand
+		// prints no path otherwise); on Windows its native `\` separators are
+		// rewritten too, so displayed paths stay uniform.
+		let (code, capture) = run_util::<Rg>(
+			&["--path-separator", "|", "-H", "hit", if cfg!(windows) { "sub\\a.txt" } else { "sub/a.txt" }],
+			"",
+			tree.path(),
+		);
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "sub|a.txt:hit\n");
+	}
+
+	/// `rg -a` searches a sparse file as one endless line of NUL bytes; with no
+	/// bound on the line buffer the host process grew until the kernel killed
+	/// it. Now that file is a per-file error and the other files are searched.
+	#[cfg(unix)]
+	#[test]
+	fn text_search_of_a_line_longer_than_the_limit_is_a_file_error() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_util::<Rg>(&["-a", "needle", "."], "", tree.path());
+
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(capture.out().lines().any(|line| line.ends_with("small:needle")), "{}", capture.out());
+		let err = capture.err();
+		assert!(err.contains("big: line longer than 256 MiB, not searched"), "{err}");
+	}
+
+	/// A multi-line search (`-U`) that can match across lines buffers the whole
+	/// file, which on a sparse file grew the host without bound.
+	#[cfg(unix)]
+	#[test]
+	fn multiline_text_search_of_a_file_larger_than_the_limit_is_a_file_error() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_util::<Rg>(&["-U", "-a", "needle\\n", "."], "", tree.path());
+
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(capture.out().lines().any(|line| line.ends_with("small:needle")), "{}", capture.out());
+		let err = capture.err();
+		assert!(err.contains("big: file larger than 256 MiB, not searched"), "{err}");
+	}
+
+	/// `-f` used to read the whole pattern file into memory; on a sparse file
+	/// that killed the host. Now an over-size pattern file is refused.
+	#[cfg(unix)]
+	#[test]
+	fn pattern_file_larger_than_the_limit_is_refused() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_util::<Rg>(&["-f", "big", "small"], "", tree.path());
+
+		assert_eq!(code, 2);
+		assert_eq!(capture.out(), "");
+		let err = capture.err();
+		assert!(err.contains("rg: big: pattern file larger than 256 MiB"), "{err}");
 	}
 }
 

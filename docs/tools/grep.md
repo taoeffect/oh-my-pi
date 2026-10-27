@@ -89,7 +89,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 12. Native result paths are root-relative with raw entry names; below a URL root `resolveSearchResultPath()` joins them back into full URLs with percent-encoded segments (`local://notes/a%20b.md`). Archive scratch paths are remapped back to user-facing selectors before rendering.
 13. JS output shaping then:
    - caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
-   - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes;
+   - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes, and names the rendered files the cap trimmed in a closing line placed past the byte cap (`More than 20 matches in a.ts; grep keeps the first 20 per file when searching several. Search one file alone for up to 200.`; a single file gets `More than 200 matches; …` with a line-range hint). The page label's total reads `N+` only when native grep stopped at `INTERNAL_TOTAL_CAP`, not when a per-file cap bit;
    - round-robins selected per-file matches so one file does not monopolize the page;
    - formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` for TUI;
    - in hashline mode, calls `getEditStore(session).recordSnapshotFile()` for each eligible rendered file to mint the `#TAG` anchor, then records emitted lines with `recordSeenLinesFromBody()`. Archive entries, immutable external materializations, and immutable URL schemes are skipped; a mutable file-backed URL (`local://`) is snapshotted against its backing host file (`resultSnapshotPath()`). Files too large or unreadable for snapshots fall back to plain line output.
@@ -109,12 +109,13 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 3. **Multiple explicit paths/globs**
    - `resolveExplicitSearchPaths()` collapses them into a common base and either a brace-union glob, an explicit file list, or per-target searches when the common ancestor is not itself a requested scope (or a plain-file entry would be demoted into a directory walk).
    - Missing entries are skipped non-fatally unless all are missing.
+   - An entry starting with `!` (unless it names an existing path) is an exclusion glob, not a search root: `!*.test.ts` drops matching files at any depth, `!vendor` drops that folder anywhere, `!src/legacy` (or `!./gen`) drops it relative to cwd only. Like `rg -g '!…'`, exclusions filter what is walked below each named path, never a named path itself (`src/app.test.ts;!*.test.ts` searches that file). With only exclusions the search covers `.`. `exclusionsForRoot()` rebases them onto each native search root as `exclude`, marking a cwd-relative one as root-anchored with a leading `/`; the walker's `WalkFilter::exclude` skips matching files and does not walk matching folders, so excluded files never count toward the match cap or the 20-file page. `approvalCacheTargets` drops exclusion entries, so they grant nothing, and keys cwd as well for any list holding one, since execution may search cwd.
 4. **Archive member paths**
    - Supported for UTF-8 text entries only. The member is extracted to a temporary scratch file for native grep, then displayed as `archive.ext:member`.
 5. **Internal URL paths**
    - Native grep walks and reads them through the URL filesystem (`skill://<name>` searches the skill directory; `omp://` walks every embedded documentation file, so it works as a docs search root). Hits are named by full URL.
    - URL globs split into base URL + glob (`local://notes/**/*.md`, `local://*.md`).
-   - A directory resource the filesystem cannot list (a remote `ssh://` directory) fails with `… lists only through the read tool` instead of searching its listing text.
+   - Remote `ssh://` directories expose structured entries through the URL filesystem, so directory and glob scopes search real remote file contents and retain `ssh://` identities. Listing responses above 1 MiB are refused rather than silently truncated; the existing 1 MiB UTF-8 per-file limit still applies.
    - Sources from immutable schemes suppress editable hashline anchors; `local://` hits keep them.
 
 ## Side Effects
@@ -148,7 +149,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `Skip must be a non-negative number` for negative or non-finite `skip`.
 - `Search scope entries must be non-empty paths or globs` when any normalized `path` entry is empty.
 - `Cannot search <url>: <reason>` when an internal URL (or a URL glob's base) cannot be stat'ed through the URL filesystem: the handler's diagnosis (`Artifact 9 not found. Available: …`, `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
-- `… lists only through the read tool` (from native grep) for a directory resource with no local path (e.g. a remote `ssh://` directory).
+- `… lists only through the read tool` (from native grep) for a directory resource with neither structured entries nor a local path.
 - `Cannot search external URL: ... Use \`read\` to fetch web content, then search the returned text.` for non-fetchable external URL schemes (`ftp`/`ws`/`wss`) or declined fetches.
 - Line-range selector errors include `Line-range selector requires a single file, not a glob: ...`, `Line-range selector requires a single file: ... is a directory`, and `Path not found for line-range selector: ...`.
 - `Cannot search archive member(s): ...` when all archive selectors are unreadable, binary, or non-UTF-8.

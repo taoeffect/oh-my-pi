@@ -68,6 +68,10 @@ pub struct EditPolicy {
 	pub allow_fuzzy:          bool,
 	pub fuzzy_threshold:      f64,
 	pub enforce_seen_lines:   bool,
+	/// Narrowest per-line display cap any tool applies, in UTF-8 bytes (0: no
+	/// tool cuts lines). Without recorded read provenance, hashline anchors on
+	/// longer lines are rejected.
+	pub max_columns:          u32,
 	pub block_auto_generated: bool,
 	pub plan_active:          bool,
 	/// Registered internal URL schemes (router spec keys).
@@ -102,6 +106,7 @@ impl EditPolicy {
 			allow_fuzzy:        self.allow_fuzzy,
 			fuzzy_threshold:    self.fuzzy_threshold,
 			enforce_seen_lines: self.enforce_seen_lines,
+			max_columns:        self.max_columns as usize,
 			raw_input:          self.raw_input,
 		})
 	}
@@ -221,12 +226,13 @@ pub struct EditFileOutcome {
 }
 
 /// Whole-call apply outcome. `is_error` carries the model-facing failure in
-/// `text` with no files.
+/// `text` with no files, and `error_kind` its class (`EditError::kind`).
 #[napi(object)]
 pub struct EditApplyOutcome {
-	pub text:     String,
-	pub files:    Vec<EditFileOutcome>,
-	pub is_error: bool,
+	pub text:       String,
+	pub files:      Vec<EditFileOutcome>,
+	pub is_error:   bool,
+	pub error_kind: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -628,8 +634,8 @@ impl EditSession {
 		drop(session);
 		Ok(match outcome {
 			Ok(outcome) => EditApplyOutcome {
-				text:     outcome.text,
-				files:    outcome
+				text:       outcome.text,
+				files:      outcome
 					.files
 					.into_iter()
 					.map(|file| EditFileOutcome {
@@ -648,10 +654,14 @@ impl EditSession {
 						parse_regressed:    file.parse_regressed,
 					})
 					.collect(),
-				is_error: false,
+				is_error:   false,
+				error_kind: None,
 			},
-			Err(err) => {
-				EditApplyOutcome { text: err.to_string(), files: Vec::new(), is_error: true }
+			Err(err) => EditApplyOutcome {
+				error_kind: Some(err.kind().to_owned()),
+				text:       err.to_string(),
+				files:      Vec::new(),
+				is_error:   true,
 			},
 		})
 	}
@@ -790,7 +800,7 @@ pub struct EditInspection {
 pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
 	let mode = parse_mode(&mode)?;
 	let snapshot = snapshot_from_text(&args_json, false, true);
-	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false);
+	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false, 0);
 	let inspection = engine.inspect(&snapshot);
 	Ok(EditInspection {
 		paths:    inspection.paths,
@@ -846,6 +856,15 @@ pub fn edit_description(mode: String) -> Result<String> {
 #[napi]
 pub fn edit_grammar(mode: String) -> Result<Option<String>> {
 	Ok(pi_edit::grammar(parse_mode(&mode)?).map(str::to_owned))
+}
+
+/// Every `errorKind` a failed apply outcome can carry.
+#[napi]
+pub fn edit_error_kinds() -> Vec<String> {
+	EditError::KINDS
+		.iter()
+		.map(|kind| (*kind).to_owned())
+		.collect()
 }
 
 /// Auto-generated-file guard: the rejection message when `absolutePath`
@@ -981,6 +1000,7 @@ mod tests {
 			allow_fuzzy:        true,
 			fuzzy_threshold:    0.95,
 			enforce_seen_lines: false,
+			max_columns:        512,
 			raw_input:          false,
 		};
 		let (wake, _rx) = flume::bounded::<()>(1);

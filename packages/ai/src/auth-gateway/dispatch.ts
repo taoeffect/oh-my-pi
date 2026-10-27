@@ -8,7 +8,7 @@
  * broker-backed rotation policy and the same usage ledger.
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
@@ -229,8 +229,15 @@ export function buildGatewayApiKeyResolver(
 ): ApiKeyResolver {
 	const { storage } = opts;
 	let lastKey = initialKey.apiKey;
+	// One resolver serves many requests, and they fail out of order, so the
+	// token a 401 rejected is looked up from the bearer that request sent.
+	const provenance = createOAuthProvenance();
+	provenance.record(initialKey);
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
+		// Only the bearer the failed request actually sent names the rejected
+		// token; a caller that cannot report it keeps the previous behaviour.
+		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
 			return initialKey;
@@ -243,8 +250,10 @@ export function buildGatewayApiKeyResolver(
 					...modelKeyOptions(model, sig),
 					forceRefresh: true,
 					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+					rejectedAccessToken,
 				},
 			);
+			provenance.record(refreshed);
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) onResolvedKey?.(refreshed);
 			return refreshed;
@@ -260,6 +269,7 @@ export function buildGatewayApiKeyResolver(
 			format,
 			peer,
 		);
+		provenance.record(next);
 		lastKey = next?.apiKey ?? lastKey;
 		if (next) onResolvedKey?.(next);
 		return next;

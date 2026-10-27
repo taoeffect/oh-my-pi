@@ -64,6 +64,7 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 - user plugins data root `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default) — user-scoped marketplace installs
 - `<anchor>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs
 - user plugins data root `cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
+- user plugins data root `project_registries.json` — project `installed_plugins.json` files whose installs link into the shared plugin cache; consulted before a cached plugin directory is deleted, so cleanup run outside a project does not remove a directory that project still uses
 - `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its `package.json` `omp.extensions` and tools to load
 - `<scope>/plugins/omp-plugins.lock.json` — enablement and feature state shared with the runtime plugin loader
 
@@ -277,8 +278,8 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
 
 ## Mode differences and precedence
 
-- `--dry-run` (install): returns a synthetic install result with no `bun install`, no network, and no lockfile/runtime-state writes (it still ensures the plugins `package.json` skeleton exists).
-- `--dry-run` for local link/install paths prints a preview without reading the package; marketplace install/uninstall previews perform local validation without mutation. Other actions do not necessarily consume this flag.
+- `--dry-run` (install): returns a synthetic install result with no `bun install`, no network, and no writes (not even the plugins `package.json` skeleton).
+- `--dry-run` for local link/install paths prints a preview without reading the package; marketplace install/uninstall previews perform local validation without mutation. Marketplace `upgrade --dry-run` reads only the registries, cached catalogs and local manifests: with no id it lists the outdated pairs `checkForUpdates` reports (what `upgradeAllPlugins` acts on); with an id it lists every scope `upgradePlugin`/`upgradePluginAcrossScopes` would force-reinstall, same or older catalog versions included (`previewUpgradePlugin`, which shares the scope resolution of those two methods and the `classifyVersionChange` rule of `checkForUpdates`). Other mutating actions (`marketplace add|remove|update`, `upgrade` of npm/git plugins, `enable`, `disable`, `features` changes, `config set|delete`, `doctor --fix`) reject `--dry-run` with exit code 1 before writing anything (npm/git `upgrade` first reports an unknown or linked plugin as the real command does); read-only actions ignore it.
 - `--json`: requested output formatting, not a transactional guarantee; marketplace mutation handlers do not all emit JSON.
 - Project overrides always take precedence over global lockfile for feature/settings view.
 - Effective enablement is `runtimeEnabled && !projectDisabled`.

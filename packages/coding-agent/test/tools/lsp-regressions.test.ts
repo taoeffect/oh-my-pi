@@ -7,6 +7,7 @@ import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-co
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { rejectionOf } from "../helpers/rejection";
 import { restoreEnvValue } from "../helpers/settings-test-state";
 import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
@@ -313,6 +314,24 @@ function documentUri(params: unknown): string | undefined {
 	const doc = params.textDocument;
 	if (!doc || typeof doc !== "object" || !("uri" in doc) || typeof doc.uri !== "string") return undefined;
 	return doc.uri;
+}
+
+/** Longer than the window after which an unused document closes when the next one opens. */
+const PAST_DOCUMENT_IDLE_MS = 6 * 60 * 1000;
+
+/** Write `name` under the client's cwd and open it through `client`. */
+async function openDocument(client: LspClient, name: string): Promise<string> {
+	const filePath = path.join(client.cwd, name);
+	await Bun.write(filePath, `export const value = "${name}";\n`);
+	await lspClient.ensureFileOpen(client, filePath);
+	return filePath;
+}
+
+/** Age an open document as if no operation had used it for `idleMs`. */
+function ageDocument(client: LspClient, filePath: string, idleMs: number): void {
+	const info = client.openFiles.get(fileToUri(filePath));
+	if (!info) throw new Error(`${filePath} is not open`);
+	info.lastUsedAt = Date.now() - idleMs;
 }
 
 type BunSpawnOptions = Bun.SpawnOptions.SpawnOptions<
@@ -797,6 +816,481 @@ describe("lsp regressions", () => {
 		} finally {
 			lspClient.setIdleTimeout(null);
 			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("closes documents unused for five minutes before opening the next one", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const stalePath = await openDocument(client, "stale.ts");
+			const recentPath = await openDocument(client, "recent.ts");
+			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			ageDocument(client, recentPath, 60_000);
+			const staleUri = fileToUri(stalePath);
+			const recentUri = fileToUri(recentPath);
+			client.diagnostics.set(staleUri, { diagnostics: [], version: 1 });
+
+			const nextUri = fileToUri(await openDocument(client, "next.ts"));
+			await server.waitFor(
+				message => message.method === "textDocument/didOpen" && documentUri(message.params) === nextUri,
+			);
+
+			// The close reaches the server before the open, which is when TypeScript servers drop unused projects.
+			const documentEvents = server.received
+				.filter(message => message.method === "textDocument/didOpen" || message.method === "textDocument/didClose")
+				.map(message => [message.method, documentUri(message.params)]);
+			expect(documentEvents).toEqual([
+				["textDocument/didOpen", staleUri],
+				["textDocument/didOpen", recentUri],
+				["textDocument/didClose", staleUri],
+				["textDocument/didOpen", nextUri],
+			]);
+			expect([...client.openFiles.keys()]).toEqual([recentUri, nextUri]);
+			expect(client.diagnostics.has(staleUri)).toBe(false);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("closes idle documents before a write opens a new one", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-write-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const stalePath = await openDocument(client, "stale.ts");
+			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			const writtenPath = path.join(tempDir.path(), "written.ts");
+
+			await lspClient.syncContent(client, writtenPath, "export const written = 1;\n");
+			await server.waitFor(
+				message =>
+					message.method === "textDocument/didOpen" && documentUri(message.params) === fileToUri(writtenPath),
+			);
+
+			const documentEvents = server.received
+				.filter(message => message.method === "textDocument/didOpen" || message.method === "textDocument/didClose")
+				.map(message => [message.method, documentUri(message.params)]);
+			expect(documentEvents.slice(-2)).toEqual([
+				["textDocument/didClose", fileToUri(stalePath)],
+				["textDocument/didOpen", fileToUri(writtenPath)],
+			]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not count a refresh of every open document as a use", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-refresh-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const idlePath = await openDocument(client, "idle.ts");
+			ageDocument(client, idlePath, PAST_DOCUMENT_IDLE_MS);
+			const createdPath = path.join(tempDir.path(), "created.ts");
+			await Bun.write(createdPath, "export const created = 1;\n");
+
+			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
+				{ filePath: createdPath, type: lspClient.FileChangeType.Created },
+			]);
+			await server.waitFor(
+				message =>
+					message.method === "textDocument/didChange" && documentUri(message.params) === fileToUri(idlePath),
+			);
+			await openDocument(client, "next.ts");
+
+			expect(client.openFiles.has(fileToUri(idlePath))).toBe(false);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("keeps an idle document open while a write to it has not reached disk", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-pending-");
+		try {
+			installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const pendingPath = await openDocument(client, "pending.ts");
+			ageDocument(client, pendingPath, PAST_DOCUMENT_IDLE_MS);
+
+			lspClient.beginPendingDiskWrite(pendingPath);
+			try {
+				await openDocument(client, "next.ts");
+				expect(client.openFiles.has(fileToUri(pendingPath))).toBe(true);
+			} finally {
+				lspClient.endPendingDiskWrite(pendingPath);
+			}
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("tears down a server that stops reading stdin while an idle document closes", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-wedge-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			ageDocument(client, await openDocument(client, "stale.ts"), PAST_DOCUMENT_IDLE_MS);
+			vi.spyOn(client.proc.stdin, "flush").mockImplementation(() => Promise.withResolvers<number>().promise);
+
+			const controller = new AbortController();
+			const opening = lspClient.syncContent(
+				client,
+				path.join(tempDir.path(), "new.ts"),
+				"export const created = 1;\n",
+				controller.signal,
+			);
+			await server.waitFor(message => message.method === "textDocument/didClose");
+			controller.abort();
+			await rejectionOf(opening);
+
+			// The close's drain is bounded by the opener's deadline, so the wedged client
+			// is killed instead of every later write queueing behind it.
+			expect(await client.proc.exited).toBe(0);
+			expect(lspClient.getActiveClients()).toEqual([]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("tears down a server that stops reading stdin while a close outliving its cancelled opener is written", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-wedge-after-abort-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			ageDocument(client, await openDocument(client, "stale.ts"), PAST_DOCUMENT_IDLE_MS);
+			vi.spyOn(client.proc.stdin, "flush").mockImplementation(() => Promise.withResolvers<number>().promise);
+			// The close's own drain budget, expired on demand instead of on the wall clock.
+			const closeBudget = new AbortController();
+			vi.spyOn(AbortSignal, "timeout").mockImplementation(() => closeBudget.signal);
+
+			const controller = new AbortController();
+			const opening = lspClient.syncContent(
+				client,
+				path.join(tempDir.path(), "new.ts"),
+				"export const created = 1;\n",
+				controller.signal,
+			);
+			// Aborted before the close's write starts, so the opener's signal no longer bounds it.
+			controller.abort();
+			await rejectionOf(opening);
+			await server.waitFor(message => message.method === "textDocument/didClose");
+			closeBudget.abort(new Error("close drain budget spent"));
+
+			expect(await client.proc.exited).toBe(0);
+			expect(lspClient.getActiveClients()).toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("sends an idle document's close even when the opener that chose it is cancelled first", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-aborted-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const stalePath = await openDocument(client, "stale.ts");
+			const staleUri = fileToUri(stalePath);
+			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			client.diagnostics.set(staleUri, { diagnostics: [], version: 1 });
+
+			const controller = new AbortController();
+			const newPath = path.join(tempDir.path(), "new.ts");
+			const opening = lspClient.syncContent(client, newPath, "export const created = 1;\n", controller.signal);
+			controller.abort();
+			await rejectionOf(opening);
+
+			await server.waitFor(
+				message => message.method === "textDocument/didClose" && documentUri(message.params) === staleUri,
+			);
+			expect(client.openFiles.has(staleUri)).toBe(false);
+			expect(client.diagnostics.has(staleUri)).toBe(false);
+			expect(server.received.some(message => documentUri(message.params) === fileToUri(newPath))).toBe(false);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("reopens a document whose close outlived its cancelled opener with the disk text and a fresh use", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-reopen-race-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const stalePath = await openDocument(client, "stale.ts");
+			const staleUri = fileToUri(stalePath);
+			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			const edited = 'export const value = "edited outside omp";\n';
+			await Bun.write(stalePath, edited);
+
+			const controller = new AbortController();
+			const opening = lspClient.syncContent(
+				client,
+				path.join(tempDir.path(), "new.ts"),
+				"export const created = 1;\n",
+				controller.signal,
+			);
+			// Starts while the stale document's close is still queued behind the aborted opener.
+			const reconciling = lspClient.reconcileFileFromDisk(client, stalePath);
+			controller.abort();
+			await rejectionOf(opening);
+			expect(await reconciling).toBe(true);
+
+			const lifecycle = server.received.filter(
+				message =>
+					(message.method === "textDocument/didOpen" || message.method === "textDocument/didClose") &&
+					documentUri(message.params) === staleUri,
+			);
+			expect(lifecycle.map(message => message.method)).toEqual([
+				"textDocument/didOpen",
+				"textDocument/didClose",
+				"textDocument/didOpen",
+			]);
+			// The server gets the text queries will compute positions from.
+			expect(lifecycle[2].params).toMatchObject({ textDocument: { version: 2, text: edited } });
+
+			// The reopen counts as a use, so the next open does not close it again.
+			await openDocument(client, "third.ts");
+			expect(client.openFiles.has(staleUri)).toBe(true);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("refreshes a document whose close outlived its cancelled opener by reopening it", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-refresh-race-");
+		try {
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const stalePath = await openDocument(client, "stale.ts");
+			const staleUri = fileToUri(stalePath);
+			ageDocument(client, stalePath, PAST_DOCUMENT_IDLE_MS);
+			client.diagnostics.set(staleUri, {
+				diagnostics: [
+					{
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+						message: "stale error",
+						severity: 1,
+					},
+				],
+				version: 1,
+			});
+
+			const controller = new AbortController();
+			const opening = lspClient.syncContent(
+				client,
+				path.join(tempDir.path(), "new.ts"),
+				"export const created = 1;\n",
+				controller.signal,
+			);
+			const refreshing = lspClient.refreshFile(client, stalePath);
+			controller.abort();
+			await rejectionOf(opening);
+			await refreshing;
+
+			const lifecycle = server.received.filter(
+				message =>
+					(message.method === "textDocument/didOpen" || message.method === "textDocument/didClose") &&
+					documentUri(message.params) === staleUri,
+			);
+			// The refresh reaches the server as a reopen, which it answers with fresh diagnostics.
+			expect(lifecycle.map(message => message.method)).toEqual([
+				"textDocument/didOpen",
+				"textDocument/didClose",
+				"textDocument/didOpen",
+			]);
+			expect(client.diagnostics.has(staleUri)).toBe(false);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not report a reopened document clean from the publish that cleared it on close", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-close-clear-");
+		try {
+			await initTheme();
+			const serverConfig: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			installHandshakeLsp();
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
+			client.startedAt = Date.now() - PAST_DOCUMENT_IDLE_MS;
+			const targetPath = await openDocument(client, "target.ts");
+			const targetUri = fileToUri(targetPath);
+			ageDocument(client, targetPath, PAST_DOCUMENT_IDLE_MS);
+			await openDocument(client, "next.ts");
+
+			// Drive waitForDiagnostics' polls on a fake clock: the empty publish that
+			// cleared the closed document lands after the reopen, and stays the latest
+			// publish past the settle window before the reopened error arrives.
+			let now = Date.now();
+			let polls = 0;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			vi.spyOn(Bun, "sleep").mockImplementation(async () => {
+				now += 100;
+				polls++;
+				if (polls === 1) client.diagnostics.set(targetUri, { diagnostics: [], version: null });
+				if (polls === 6) {
+					client.diagnostics.set(targetUri, {
+						diagnostics: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+								message: "reopened error",
+								severity: 1,
+							},
+						],
+						version: client.openFiles.get(targetUri)?.version ?? null,
+					});
+				}
+				if (polls === 1 || polls === 6) client.diagnosticsVersion += 1;
+			});
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("diagnostics-after-idle-close", { action: "diagnostics", file: targetPath });
+
+			expect(textResult(result)).toContain("reopened error");
+			// The reopen resumes past the version the server saw before the close.
+			expect(client.openFiles.get(targetUri)?.version).toBe(2);
+		} finally {
+			vi.restoreAllMocks();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not report a reopened document's diagnostics from a publish versioned before the close", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-old-publish-");
+		try {
+			await initTheme();
+			const serverConfig: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			installHandshakeLsp();
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
+			client.startedAt = Date.now() - PAST_DOCUMENT_IDLE_MS;
+			const targetPath = await openDocument(client, "target.ts");
+			const targetUri = fileToUri(targetPath);
+			ageDocument(client, targetPath, PAST_DOCUMENT_IDLE_MS);
+			await openDocument(client, "next.ts");
+			const errorAt = (message: string, version: number) => {
+				const diagnostic: Diagnostic = {
+					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+					message,
+					severity: 1,
+				};
+				return { diagnostics: [diagnostic], version };
+			};
+
+			// A publish from the document's life before the close (version 1) lands after
+			// the reopen at version 2 and stays the latest past the settle window.
+			let now = Date.now();
+			let polls = 0;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			vi.spyOn(Bun, "sleep").mockImplementation(async () => {
+				now += 100;
+				polls++;
+				if (polls === 1) client.diagnostics.set(targetUri, errorAt("error before close", 1));
+				if (polls === 6) client.diagnostics.set(targetUri, errorAt("reopened error", 2));
+				if (polls === 1 || polls === 6) client.diagnosticsVersion += 1;
+			});
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("diagnostics-old-publish", { action: "diagnostics", file: targetPath });
+
+			expect(client.openFiles.get(targetUri)?.version).toBe(2);
+			expect(textResult(result)).toContain("reopened error");
+			expect(textResult(result)).not.toContain("error before close");
+		} finally {
+			vi.restoreAllMocks();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("pulls fresh diagnostics for code actions on a document reopened after an idle close", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-idle-docs-code-actions-");
+		const error: Diagnostic = {
+			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+			message: "needs fixing",
+			severity: 1,
+		};
+		try {
+			const serverConfig: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			let contextDiagnostics = -1;
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { codeActionProvider: true, diagnosticProvider: true } },
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { kind: "full", items: [error] } });
+				} else if (message.method === "textDocument/codeAction") {
+					const params = message.params;
+					contextDiagnostics =
+						typeof params === "object" &&
+						params !== null &&
+						"context" in params &&
+						typeof params.context === "object" &&
+						params.context !== null &&
+						"diagnostics" in params.context &&
+						Array.isArray(params.context.diagnostics)
+							? params.context.diagnostics.length
+							: -1;
+					srv.send({ jsonrpc: "2.0", id: message.id, result: [{ title: "Fix it", kind: "quickfix" }] });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
+			const targetPath = await openDocument(client, "target.ts");
+			client.diagnostics.set(fileToUri(targetPath), { diagnostics: [error], version: 1 });
+			ageDocument(client, targetPath, PAST_DOCUMENT_IDLE_MS);
+			await openDocument(client, "next.ts");
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			await tool.execute("code-actions-after-idle-close", { action: "code_actions", file: targetPath, line: 1 });
+
+			expect(contextDiagnostics).toBe(1);
+		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -1923,6 +2417,74 @@ describe("lsp regressions", () => {
 		}, 15_000);
 	}
 
+	it("refreshes externally edited open dependencies before importer diagnostics", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-open-dependency-");
+		const cwd = tempDir.path();
+		const dependency = path.join(cwd, "types.ts");
+		const importer = path.join(cwd, "consumer.ts");
+		const dependencyUri = fileToUri(dependency);
+		const missingExport: Diagnostic = {
+			message: "Module has no exported member 'Added'.",
+			severity: 1,
+			code: 2305,
+			source: "ts",
+			range: { start: { line: 0, character: 14 }, end: { line: 0, character: 19 } },
+		};
+		let hasExport = false;
+		try {
+			await Bun.write(dependency, "export type Existing = boolean;\n");
+			await Bun.write(importer, 'import type { Added } from "./types.js";\nexport const value: Added = true;\n');
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+				} else if (documentUri(message.params) === dependencyUri) {
+					if (message.method === "textDocument/didOpen") {
+						const doc = piUtils.isRecord(message.params) ? message.params.textDocument : undefined;
+						hasExport = piUtils.isRecord(doc) && typeof doc.text === "string" && doc.text.includes("type Added");
+					} else if (message.method === "textDocument/didChange") {
+						const changes = piUtils.isRecord(message.params) ? message.params.contentChanges : undefined;
+						const change = Array.isArray(changes) ? changes[0] : undefined;
+						hasExport =
+							piUtils.isRecord(change) && typeof change.text === "string" && change.text.includes("type Added");
+					}
+				}
+				if (message.method === "textDocument/diagnostic") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { kind: "full", items: hasExport ? [] : [missingExport] },
+					});
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const serverConfig: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			configCache.set(cwd, { servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, cwd);
+			await lspClient.ensureFileOpen(client, dependency);
+			const tool = new LspTool(makeLspSession(cwd));
+			const diagnostics = async () =>
+				textResult(await tool.execute("dependency-diags", { action: "diagnostics", file: importer, timeout: 20 }));
+
+			expect(await diagnostics()).toContain("no exported member 'Added'");
+			await Bun.write(dependency, "export type Existing = boolean;\nexport type Added = boolean;\n");
+			expect(await diagnostics()).toBe("OK");
+
+			await Bun.write(dependency, "export type Existing = boolean;\n");
+			await lspClient.reconcileFileFromDisk(client, dependency);
+			expect(await diagnostics()).toContain("no exported member 'Added'");
+			await Bun.write(dependency, "export type Existing = boolean;\nexport type Added = boolean;\n");
+			const write = createLspWritethrough(cwd, { enableDiagnostics: true });
+			expect((await write(importer, await Bun.file(importer).text())).diagnostics?.summary).toBe("OK");
+		} finally {
+			configCache.delete(cwd);
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 30_000);
+
 	for (const scenario of [
 		{
 			name: "rejects a failed document pull when no publish follows (#10035)",
@@ -2244,7 +2806,7 @@ describe("lsp regressions", () => {
 				requestId: 0,
 				diagnostics: new Map([[targetUri, { diagnostics: [staleDiagnostic], version: null }]]),
 				diagnosticsVersion: 1,
-				openFiles: new Map([[targetUri, { version: 1, languageId: "typescript" }]]),
+				openFiles: new Map([[targetUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() }]]),
 				pendingRequests: new Map(),
 				isReading: false,
 				status: "ready",
@@ -4299,6 +4861,40 @@ describe("lsp regressions", () => {
 			expect(client.openFiles.has(fileToUri(oldPath))).toBe(true);
 			expect(server.received.filter(message => message.method === "textDocument/didClose")).toEqual([]);
 			expect(server.received.filter(message => message.method === "workspace/didChangeWatchedFiles")).toEqual([]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("closes an open document when a harness delete announces it (#16880)", async () => {
+		// The Edit tool's delete only sends didChangeWatchedFiles. Servers treat an
+		// open document as authoritative over disk, so without didClose the deleted
+		// file kept appearing in references and rename edits.
+		const tempDir = TempDir.createSync("@omp-lsp-deleted-open-doc-");
+		try {
+			const consumer = path.join(tempDir.path(), "consumer.ts");
+			const kept = path.join(tempDir.path(), "kept.ts");
+			await Bun.write(consumer, "import { x } from './kept';\n");
+			await Bun.write(kept, "export const x = 1;\n");
+
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await lspClient.ensureFileOpen(client, consumer);
+			await lspClient.ensureFileOpen(client, kept);
+
+			await fsp.unlink(consumer);
+			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
+				{ filePath: consumer, type: lspClient.FileChangeType.Deleted },
+			]);
+
+			const closed = server.received
+				.filter(message => message.method === "textDocument/didClose")
+				.map(message => message.params);
+			expect(closed).toEqual([{ textDocument: { uri: fileToUri(consumer) } }]);
+			expect(client.openFiles.has(fileToUri(consumer))).toBe(false);
+			expect(client.openFiles.has(fileToUri(kept))).toBe(true);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();

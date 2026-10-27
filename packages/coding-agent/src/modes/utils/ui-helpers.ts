@@ -246,7 +246,9 @@ export class UiHelpers {
 	 * Show a status message in the chat.
 	 *
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
-	 * we update the previous status line instead of appending new ones to avoid log spam.
+	 * we update the previous status line instead of appending new ones to avoid log spam. A repeat of the
+	 * exact same text replaces the line with a fresh notice: an in-place update with identical props sends
+	 * nothing to a native terminal, so its expired toast would never show again.
 	 */
 	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
@@ -258,9 +260,12 @@ export class UiHelpers {
 		const notice = { styleFn, toast: options?.toast };
 
 		if (last && last === this.ctx.lastStatus) {
-			this.ctx.lastStatus.setMessage(message, notice);
-			this.ctx.ui.requestRender();
-			return;
+			if (this.ctx.lastStatus.message !== message) {
+				this.ctx.lastStatus.setMessage(message, notice);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			this.ctx.chatContainer.removeChild(last);
 		}
 
 		const status = new StatusNotice(message, notice);
@@ -1303,7 +1308,11 @@ export class UiHelpers {
 		if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 	}
 
-	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
+	/** Deliver one compaction-queued message; `onQueued` receives what it pushes onto the session queues. */
+	async #deliverQueuedMessage(
+		message: CompactionQueuedMessage,
+		onQueued: (queued: readonly AgentMessage[]) => void,
+	): Promise<void> {
 		const builtin = await executeBuiltinSlashCommand(message.text, {
 			ctx: this.ctx,
 			input: message.images ? { images: message.images } : undefined,
@@ -1316,6 +1325,7 @@ export class UiHelpers {
 			const forwarded = await this.ctx.session.prompt(builtin, {
 				streamingBehavior: message.mode,
 				images: message.images,
+				onPromptQueued: onQueued,
 			});
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
@@ -1325,11 +1335,13 @@ export class UiHelpers {
 				propagateErrors: true,
 				queueOnly: true,
 				images: message.images,
+				onPromptQueued: onQueued,
 			})
 		) {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
+			// No `streamingBehavior`: this prompt never queues (a busy session rejects it).
 			const forwarded = await this.ctx.session.prompt(message.text);
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
@@ -1338,8 +1350,8 @@ export class UiHelpers {
 			message.text,
 			() =>
 				message.mode === "followUp"
-					? this.ctx.session.followUp(message.text, message.images)
-					: this.ctx.session.steer(message.text, message.images),
+					? this.ctx.session.followUp(message.text, message.images, { onPromptQueued: onQueued })
+					: this.ctx.session.steer(message.text, message.images, { onPromptQueued: onQueued }),
 			{ imageCount: message.images?.length ?? 0 },
 		);
 	}
@@ -1374,22 +1386,49 @@ export class UiHelpers {
 		const queuedMessages = [...(this.ctx.compactionQueuedMessages as CompactionQueuedMessage[])];
 		this.ctx.compactionQueuedMessages = [] as CompactionQueuedMessage[];
 		this.ctx.updatePendingMessagesDisplay();
+		// On failure the batch goes back to the compaction queue, so the messages this flush pushed
+		// onto the session queues must leave them. Only those: what other sources queue (an
+		// extension's message, input sent through other paths), before, during or after the flush,
+		// stays queued.
+		const deliveredByFlush: AgentMessage[] = [];
+		const onDelivered = (queued: readonly AgentMessage[]) => {
+			deliveredByFlush.push(...queued);
+		};
+		let restored = false;
+		// The fire-and-forget first prompt belongs to the session once admitted (queued, or its turn
+		// started): a restore then leaves it out of the batch, and keeps its queued messages, instead
+		// of sending it again on the next flush — unless the prompt itself fails.
+		let firstPrompt: CompactionQueuedMessage | undefined;
+		/** Set once the first prompt is admitted: the messages it queued, or none if its turn started. */
+		let firstAdmitted: readonly AgentMessage[] | undefined;
+		let firstQueued: readonly AgentMessage[] = [];
+		let firstFailed = false;
+		let firstLeftOut = false;
 
-		const restoreQueue = (error: unknown) => {
-			this.ctx.session.clearQueue();
-			this.ctx.compactionQueuedMessages = queuedMessages;
+		const reportFailure = (count: number, error: unknown) => {
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
+				`Failed to send queued message${count > 1 ? "s" : ""}: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);
 		};
 
+		const restoreQueue = (error: unknown) => {
+			// A `rest` delivery and the fire-and-forget first prompt can both fail; restore once.
+			if (restored) return;
+			restored = true;
+			firstLeftOut = firstAdmitted !== undefined && !firstFailed;
+			this.ctx.session.dropQueuedMessages(firstLeftOut ? deliveredByFlush : [...deliveredByFlush, ...firstQueued]);
+			const batch = firstLeftOut ? queuedMessages.filter(message => message !== firstPrompt) : queuedMessages;
+			this.ctx.compactionQueuedMessages = batch;
+			reportFailure(batch.length, error);
+		};
+
 		try {
 			if (options?.willRetry) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message);
+					await this.#deliverQueuedMessage(message, onDelivered);
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				return;
@@ -1404,56 +1443,111 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message);
+					await this.#deliverQueuedMessage(message, onDelivered);
 				}
 				return;
 			}
 
 			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
+			const first = queuedMessages[firstPromptIndex];
+			firstPrompt = first;
 			const rest = queuedMessages.slice(firstPromptIndex + 1);
 
 			for (const message of preCommands) {
 				// preCommands are all slash commands; #deliverQueuedMessage handles
 				// that branch (no local-submission marking needed since slash
 				// commands don't generate a matching user message_start).
-				await this.#deliverQueuedMessage(message);
+				await this.#deliverQueuedMessage(message, onDelivered);
 			}
 
+			const onFirstQueued = (queued: readonly AgentMessage[]) => {
+				firstQueued = queued;
+			};
+			const onFirstAdmitted = () => {
+				firstAdmitted = firstQueued;
+				// Admitted after the batch was already restored with it: the session must not send
+				// it as well. Take a queued prompt back out (the batch keeps it); a prompt whose turn
+				// already started leaves the batch instead.
+				if (!restored || firstLeftOut) return;
+				if (firstAdmitted.length > 0) {
+					this.ctx.session.dropQueuedMessages(firstAdmitted);
+				} else {
+					firstLeftOut = true;
+					this.ctx.compactionQueuedMessages = this.ctx.compactionQueuedMessages.filter(m => m !== first);
+					this.ctx.updatePendingMessagesDisplay();
+				}
+			};
+			/** Put the first prompt back into the batch, after the slash commands that preceded it. */
+			const putFirstBack = () => {
+				firstLeftOut = false;
+				const current = this.ctx.compactionQueuedMessages;
+				let at = 0;
+				for (let i = 0; i < current.length; i++) if (preCommands.includes(current[i])) at = i + 1;
+				this.ctx.compactionQueuedMessages = [...current.slice(0, at), first, ...current.slice(at)];
+			};
+			const onFirstFailed = (error: unknown) => {
+				firstFailed = true;
+				if (!firstLeftOut) {
+					restoreQueue(error);
+					return;
+				}
+				// A restore left the admitted first prompt out of the batch, but it failed after all.
+				putFirstBack();
+				reportFailure(1, error);
+			};
+			// A skill prompt the session dropped before sending it (usage preflight, cost cap, an
+			// interrupt) resolves `false` even after admission, and nothing hands a custom prompt
+			// back to the editor: the session does not own it after all, so a restore keeps it in
+			// the batch, or puts it back if one already left it out.
+			const onFirstDropped = () => {
+				firstAdmitted = undefined;
+				if (!firstLeftOut) return;
+				putFirstBack();
+				this.ctx.updatePendingMessagesDisplay();
+			};
+
 			// First prompt is fire-and-forget — its rejection is funneled through
-			// `restoreQueue` rather than rethrown. Plain prompts use primitive
+			// `onFirstFailed` rather than rethrown. Plain prompts use primitive
 			// recordLocalSubmission and dispose manually in the catch. Skill prompts
 			// are rebuilt as user-attributed custom messages so queued `/skill:` text
 			// is not sent as a literal prompt after compaction.
 			let promptPromise: Promise<unknown>;
-			if (isKnownSkillCommand(this.ctx, firstPrompt.text)) {
-				const built = await buildSkillCommandPrompt(
-					this.ctx,
-					firstPrompt.text,
-					firstPrompt.mode,
-					firstPrompt.images,
-				);
+			if (isKnownSkillCommand(this.ctx, first.text)) {
+				const built = await buildSkillCommandPrompt(this.ctx, first.text, first.mode, first.images);
 				promptPromise = built
-					? this.ctx.session.promptCustomMessage(built.message, built.options).catch(restoreQueue)
+					? this.ctx.session
+							.promptCustomMessage(built.message, {
+								...built.options,
+								onPromptQueued: onFirstQueued,
+								onPromptAdmitted: onFirstAdmitted,
+							})
+							.then(sent => {
+								if (sent === false) onFirstDropped();
+							}, onFirstFailed)
 					: Promise.resolve();
 			} else {
-				const disposeFirstPrompt = this.ctx.recordLocalSubmission(
-					firstPrompt.text,
-					firstPrompt.images?.length ?? 0,
-				);
+				const disposeFirstPrompt = this.ctx.recordLocalSubmission(first.text, first.images?.length ?? 0);
 				promptPromise = this.ctx.session
-					.prompt(firstPrompt.text, {
-						streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
-						images: firstPrompt.images,
+					.prompt(first.text, {
+						streamingBehavior: first.mode === "followUp" ? "followUp" : "steer",
+						images: first.images,
+						onPromptQueued: onFirstQueued,
+						onPromptAdmitted: onFirstAdmitted,
 					})
 					.catch((error: unknown) => {
 						disposeFirstPrompt();
-						restoreQueue(error);
+						onFirstFailed(error);
 					});
 			}
 
 			for (const message of rest) {
-				await this.#deliverQueuedMessage(message);
+				await this.#deliverQueuedMessage(message, onDelivered);
+				// The first prompt failed while the rest was still being delivered: the whole batch is
+				// back in the compaction queue, so take back what was delivered since and stop.
+				if (restored) {
+					this.ctx.session.dropQueuedMessages(deliveredByFlush);
+					return;
+				}
 			}
 			this.ctx.updatePendingMessagesDisplay();
 			// The dispatch above bypasses `getUserInput`, so nothing would schedule

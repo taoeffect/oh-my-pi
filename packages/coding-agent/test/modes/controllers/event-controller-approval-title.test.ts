@@ -5,13 +5,15 @@
  * The wrapper blocks on `uiContext.select` after `tool_execution_start`; the
  * controller mirrors that to report the run `blocked` on permission. Session
  * approvals ("… Commands for Session") downgrade `prompt` → allow in the
- * wrapper, so the run must not report `blocked` for them — while the three
+ * wrapper, so the run must not report `blocked` for them — while the four
  * prompts a session grant may never answer (pending provider safety checks,
  * carried by the computer tool's synthetic event args, a tool-demanded
- * `override`, and a `task` call, which no session grant may cover) still block
- * per call and must keep reporting `blocked`.
+ * `override`, a `task` call, which no session grant may cover, and an
+ * `always-ask-cached` call with targets, which offers folder and file grants
+ * instead) still block per call and must keep reporting `blocked`.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
+import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -24,6 +26,7 @@ import { approveToolForSession, clearSessionApprovals } from "@oh-my-pi/pi-codin
 import { cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import type { RunStatus } from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_ID = "approval-title-test-session";
 
@@ -137,6 +140,22 @@ describe("EventController approval run-status mirror", () => {
 		approveToolForSession(SESSION_ID, "task");
 		ctx = createFixture(taskTool);
 		await startToolCall(ctx, "tc-7", { prompt: "explore the repo" }, "task");
+		expect(permissionBlocks(statusSpy)).toBe(1);
+	});
+
+	it("stays blocked for an always-ask-cached call with targets despite session approval", async () => {
+		// The wrapper shows the grant menu for a call with a target and honors
+		// no session approval for it, so a session approval of the tool must not
+		// clear the blocked status.
+		using agentDir = TempDir.createSync("@pi-approval-title-cached-");
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, agentDir: agentDir.path() });
+		cfgToolsApprovalMode.override(settings, "always-ask-cached");
+		approveToolForSession(SESSION_ID, "write");
+		const target = path.join(agentDir.path(), "a.txt");
+		const writeTool = { name: "write", approval: { tier: "write" }, approvalCacheTargets: () => [target] };
+		ctx = createFixture(writeTool as unknown as AgentTool);
+		await startToolCall(ctx, "tc-8", { path: "a.txt" }, "write");
 		expect(permissionBlocks(statusSpy)).toBe(1);
 	});
 });

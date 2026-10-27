@@ -306,7 +306,7 @@ describe("RPC queued-message editing", () => {
 			).toMatchObject({ errorMessage: USER_INTERRUPT_LABEL });
 		}, 30_000);
 
-		test("drops a queued non-user steer without returning or running it", async () => {
+		test("records a queued non-user steer without returning or running it", async () => {
 			await startStreamingTurn("internal-steer");
 			await untilState(state => state.queuedMessageCount === 1, "Internal steer was never queued");
 			await client.steer("queued steer");
@@ -314,7 +314,20 @@ describe("RPC queued-message editing", () => {
 			expect(await client.abortAndRestoreQueue()).toEqual({ steering: [{ text: "queued steer" }], followUp: [] });
 			expect((await client.getState()).queuedMessageCount).toBe(0);
 			const messages = await transcriptAfterNextPrompt();
-			expect(messages.filter(message => message.role === "custom")).toEqual([]);
+			// Not handed back for the editor and not lost: recorded once after the aborted reply,
+			// ahead of the next prompt, and no resume turn ran on it (two replies in all).
+			const custom = messages.filter(message => message.role === "custom");
+			expect(custom).toMatchObject([{ customType: "test-internal-steer", content: "internal steer" }]);
+			const steerIndex = messages.indexOf(custom[0]!);
+			expect(steerIndex).toBeGreaterThan(
+				messages.findIndex(message => message.role === "assistant" && message.stopReason === "aborted"),
+			);
+			expect(steerIndex).toBeLessThan(
+				messages.findIndex(
+					message => message.role === "user" && JSON.stringify(message.content).includes("after abort"),
+				),
+			);
+			expect(messages.filter(message => message.role === "assistant")).toHaveLength(2);
 			expect(userTexts(messages)).toEqual(expectedUserTurns);
 		}, 30_000);
 

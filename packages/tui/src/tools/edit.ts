@@ -95,8 +95,10 @@ export interface EditToolPerFileResult {
 
 /** Diff, diagnostics, and snapshots returned by an edit. */
 export interface EditToolDetails {
-	/** Unified diff of the changes made */
+	/** Unified diff of the changes made; empty when the edit failed */
 	diff: string;
+	/** Why the edit failed, as the engine classed it (`unseen_lines`, `stale_tag`, `parse`, …) */
+	errorKind?: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
 	/** Diagnostic result (if available) */
@@ -1222,7 +1224,7 @@ export const editToolRenderer = {
 				diffText = args.previewDiff ?? args.diff ?? "";
 				body.push(editDiff(diffText, rawPath));
 			} else if (args.diff || args.newText || args.patch) {
-				body.push(code(args.diff ?? args.newText ?? args.patch ?? "", { lang: getLanguageFromPath(rawPath) }));
+				body.push(code(args.diff ?? args.newText ?? args.patch ?? "", { path: rawPath || undefined }));
 			} else if (renderContext?.editDiffPreview) {
 				const preview = renderContext.editDiffPreview;
 				if ("error" in preview && preview.error) body.push(errorText(preview.error));
@@ -1362,9 +1364,9 @@ function editToolHead(facts: EditHeadFacts): NativeToolHead {
 	};
 }
 
-/** A file's diff: hunks highlighted by the path's language, no path header (the head or section names the file). */
+/** A file's diff: Tern highlights the hunks by the file's grammar and draws no path header (the head or section names the file). */
 function editDiff(diffText: string, filePath: string): NativeNode {
-	return nativeDiff(diffText, { lang: filePath ? getLanguageFromPath(filePath) : undefined });
+	return nativeDiff(diffText, { path: filePath || undefined });
 }
 
 /** One file's edit result for native views: head facts plus its body (diff or error, then diagnostics). */
@@ -1418,7 +1420,8 @@ function editFileParts(
 		filePathFromEditEntry(firstEdit?.rename) ??
 		filePathFromEditEntry(firstEdit?.move) ??
 		(details && "move" in details && typeof details.move === "string" ? details.move : undefined);
-	const editDiffPreview = details ? undefined : options.renderContext?.editDiffPreview;
+	// Details that only class a failure leave the streamed preview to locate it.
+	const editDiffPreview = details && !("errorKind" in details) ? undefined : options.renderContext?.editDiffPreview;
 	const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
 	const diffText = isError ? undefined : details?.diff || previewDiff;
 	const firstChangedLine =
@@ -1530,8 +1533,9 @@ function renderSingleFileResult(
 			// what happened. The shared streaming `editDiffPreview` is a call-phase
 			// artifact (in a batch it reflects only the first file), so consulting it
 			// for an empty-diff delete/move/no-op result mislabels the card. Fall
-			// back to the preview only when no details exist yet.
-			const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
+			// back to the preview only when no details exist yet, or when they only
+			// class a failure.
+			const editDiffPreview = details && !("errorKind" in details) ? undefined : renderContext?.editDiffPreview;
 			const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
 
 			if (diffSectionRenderDiffFn !== renderDiffFn) {

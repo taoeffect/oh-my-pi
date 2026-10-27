@@ -105,6 +105,7 @@ pub(crate) const fn exit_status(quiet: bool, any_match: bool, had_error: bool) -
 #[derive(Clone, Copy)]
 pub(crate) struct RecordFormat {
 	/// Byte printed in place of each `/` in a path (`rg --path-separator`).
+	/// On Windows `\` is rewritten too, so displayed paths stay uniform.
 	pub path_separator: Option<u8>,
 	/// End a printed path with NUL instead of its separator or terminator
 	/// (`grep -Z`, `rg -0`).
@@ -119,7 +120,10 @@ impl RecordFormat {
 			return out.write_all(path);
 		};
 		let mut rest = path;
-		while let Some(pos) = rest.iter().position(|&byte| byte == b'/') {
+		while let Some(pos) = rest
+			.iter()
+			.position(|&byte| byte == b'/' || (cfg!(windows) && byte == b'\\'))
+		{
 			out.write_all(&rest[..pos])?;
 			out.write_all(&[separator])?;
 			rest = &rest[pos + 1..];
@@ -1070,6 +1074,7 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 ) -> io::Result<bool> {
 	let mut sink =
 		GrepSink { out, matcher, display, opts, match_count: 0, any_match: false, binary: false };
+	let reader = BoundedSearchReader::new(reader, searcher, matcher);
 	searcher.search_reader(matcher, reader, &mut sink)?;
 	Ok(sink.any_match)
 }
@@ -1108,8 +1113,9 @@ fn search_file_path<M: Matcher, W: Write>(
 					if !opts.no_messages {
 						let _ = writeln!(
 							host.stderr,
-							"grep: {}: {error}",
-							display_path.to_string_lossy()
+							"grep: {}: {}",
+							display_path.to_string_lossy(),
+							describe_search_error(&error)
 						);
 					}
 					Ok(false)
@@ -1260,10 +1266,9 @@ fn search_dir<M: Matcher, W: Write>(
 
 fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String> {
 	let result = if path == OsStr::new("-") {
-		let mut bytes = Vec::new();
-		host.stdin.read_to_end(&mut bytes).map(|_| bytes)
+		read_pattern_source(&mut host.stdin)
 	} else {
-		host.fs().read(host.resolve(path))
+		host.fs().open(host.resolve(path)).and_then(read_pattern_source)
 	};
 	result.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
 }
@@ -1358,6 +1363,117 @@ fn build_path_rules(host: &mut Host, cli: &GrepArgs, matches: &ArgMatches) -> Re
 	Ok(PathRules { files: compile_rules(files)?, dirs: compile_rules(dirs)? })
 }
 
+/// Largest line, in bytes, one search may buffer; `grep` and `rg` share it.
+/// Both run inside the host process, so their line buffer is the host's
+/// memory: without a bound, a file with no line terminator (a sparse file reads
+/// as one endless run of NUL bytes) grows it until the kernel kills the host. A
+/// longer line is reported as an error for that file and the search goes on.
+/// Pattern files (`-f`) are held to the same size.
+pub(crate) const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
+
+/// The searcher's own allocation cap, a backstop behind [`BoundedSearchReader`].
+///
+/// The reader stops a run one read past [`MAX_LINE_BYTES`], so the buffer needs
+/// that much room plus one read's worth of growth before the typed error fires;
+/// retained context lines can still push it over, and that rarer failure is
+/// reported with the searcher's own message.
+pub(crate) const SEARCH_HEAP_LIMIT: usize = MAX_LINE_BYTES + (1 << 20);
+
+/// A search stopped because one record outgrew [`MAX_LINE_BYTES`].
+#[derive(Debug)]
+pub(crate) struct LineLimitExceeded {
+	/// The searcher buffers the whole file (multi-line search), not one line.
+	whole_file: bool,
+}
+
+impl fmt::Display for LineLimitExceeded {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let what = if self.whole_file { "file larger than" } else { "line longer than" };
+		write!(f, "{what} {} MiB, not searched", MAX_LINE_BYTES >> 20)
+	}
+}
+
+impl std::error::Error for LineLimitExceeded {}
+
+/// Enforces [`MAX_LINE_BYTES`] on what a searcher reads, failing with a typed
+/// [`LineLimitExceeded`] instead of letting the searcher's buffer grow.
+///
+/// In line mode it tracks the unterminated run since the last terminator; in
+/// whole-file mode (no terminator) every byte counts. It wraps the raw input,
+/// beneath grep-searcher's decoder, so the error reaches the caller unchanged.
+pub(crate) struct BoundedSearchReader<R> {
+	inner:      R,
+	/// `None` bounds the whole input rather than one line.
+	terminator: Option<u8>,
+	run:        usize,
+}
+
+impl<R: Read> BoundedSearchReader<R> {
+	/// Bounds `inner` the way `searcher` will buffer it for `matcher`.
+	pub(crate) fn new<M: Matcher>(inner: R, searcher: &Searcher, matcher: M) -> Self {
+		let terminator =
+			(!searcher.multi_line_with_matcher(matcher)).then(|| searcher.line_terminator().as_byte());
+		Self { inner, terminator, run: 0 }
+	}
+}
+
+impl<R: Read> Read for BoundedSearchReader<R> {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		let n = self.inner.read(buf)?;
+		let chunk = &buf[..n];
+		// Lines strictly inside one read are shorter than the read, which the
+		// searcher's heap limit already bounds; only the run crossing into
+		// this read and the one left open at its end can grow without bound.
+		let (crossing, open) = match self.terminator {
+			Some(byte) => match memchr::memchr(byte, chunk) {
+				Some(first) => (self.run + first, n - memchr::memrchr(byte, chunk).map_or(0, |last| last + 1)),
+				None => (self.run + n, self.run + n),
+			},
+			None => (self.run + n, self.run + n),
+		};
+		if crossing.max(open) > MAX_LINE_BYTES {
+			return Err(io::Error::other(LineLimitExceeded { whole_file: self.terminator.is_none() }));
+		}
+		self.run = open;
+		Ok(n)
+	}
+}
+
+/// The message for a failed search: [`LineLimitExceeded`] says which bound it
+/// hit, anything else reads as reported.
+pub(crate) fn describe_search_error(error: &io::Error) -> String {
+	match error.get_ref().and_then(|inner| inner.downcast_ref::<LineLimitExceeded>()) {
+		Some(limit) => limit.to_string(),
+		None => error.to_string(),
+	}
+}
+
+/// Reads a pattern file (`-f`), refusing one larger than [`MAX_LINE_BYTES`] so
+/// a huge file or an endless stdin cannot exhaust the host's memory.
+pub(crate) fn read_pattern_source(mut reader: impl Read) -> io::Result<Vec<u8>> {
+	let mut bytes = Vec::new();
+	// Read the limit exactly, then probe for one more byte: a `take(limit + 1)`
+	// would make the buffer double to twice the limit.
+	(&mut reader).take(MAX_LINE_BYTES as u64).read_to_end(&mut bytes)?;
+	if bytes.len() == MAX_LINE_BYTES {
+		let mut probe = [0u8; 1];
+		loop {
+			match reader.read(&mut probe) {
+				Ok(0) => break,
+				Ok(_) => {
+					return Err(io::Error::other(format!(
+						"pattern file larger than {} MiB",
+						MAX_LINE_BYTES >> 20
+					)));
+				},
+				Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+				Err(error) => return Err(error),
+			}
+		}
+	}
+	Ok(bytes)
+}
+
 fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Searcher {
 	let binary_detection = if cli.null_data || opts.binary_files == BinaryFiles::Text {
 		BinaryDetection::none()
@@ -1373,7 +1489,8 @@ fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Sea
 		.after_context(opts.after)
 		.invert_match(cli.invert)
 		.binary_detection(binary_detection)
-		.max_matches(max_count);
+		.max_matches(max_count)
+		.heap_limit(Some(SEARCH_HEAP_LIMIT));
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
 	}
@@ -1430,7 +1547,11 @@ fn execute_search<M: Matcher>(
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
-						let _ = writeln!(host.stderr, "grep: (standard input): {error}");
+						let _ = writeln!(
+							host.stderr,
+							"grep: (standard input): {}",
+							describe_search_error(&error)
+						);
 					}
 				},
 			}
@@ -1652,6 +1773,27 @@ mod tests {
 	use super::*;
 	use brush_core::openfiles;
 	use crate::host::{Host, run_caught, run_util};
+	#[cfg(unix)]
+	use crate::host::tree_with_sparse_file;
+
+	#[test]
+	fn path_separator_rewrites_the_native_separator_on_windows() {
+		// Defends: --path-separator must rewrite the platform's own separator
+		// too, or Windows paths keep mixing `\` and the configured separator.
+		let mut out = Vec::new();
+		RecordFormat {
+			path_separator: Some(b'#'),
+			null_paths:     false,
+			terminator:     b'\n',
+		}
+		.write_path(&mut out, b"a\\b/c")
+		.unwrap();
+		if cfg!(windows) {
+			assert_eq!(out, b"a#b#c");
+		} else {
+			assert_eq!(out, b"a\\b#c");
+		}
+	}
 
 	struct SnapshottingStdin {
 		pos:      usize,
@@ -1755,6 +1897,77 @@ mod tests {
 		let (code, capture) = run_util::<Grep>(&["-f", "patterns", "haystack"], "", tree.path());
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "alpha\nbeta\n");
+	}
+
+	/// A file with no line terminator used to make grep buffer it whole: on a
+	/// sparse file that is an endless line of NUL bytes, and the host process
+	/// grew until the kernel killed it. Now that file is a per-file error and
+	/// the walk still reports matches in the other files.
+	#[cfg(unix)]
+	#[test]
+	fn line_longer_than_the_limit_is_a_file_error_not_unbounded_memory() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_util::<Grep>(&["-rl", "needle", "."], "", tree.path());
+
+		assert_eq!(code, 2, "an unreadable file makes the status 2, as in GNU grep");
+		assert_eq!(capture.out(), "./small\n");
+		let err = capture.err();
+		assert!(err.contains("grep: ./big: line longer than 256 MiB, not searched"), "{err}");
+	}
+
+	/// `-f` used to read the whole pattern file into memory, so pointing it at
+	/// a sparse file (or an endless stdin) killed the host. Now an over-size
+	/// pattern file is refused before anything is searched.
+	#[cfg(unix)]
+	#[test]
+	fn pattern_file_larger_than_the_limit_is_refused() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_util::<Grep>(&["-f", "big", "small"], "", tree.path());
+
+		assert_eq!(code, 2);
+		assert_eq!(capture.out(), "");
+		let err = capture.err();
+		assert!(err.contains("grep: big: pattern file larger than 256 MiB"), "{err}");
+	}
+
+	/// Drains `input` through the line bound, as the searcher would, and
+	/// returns the typed limit error if one stopped it.
+	fn drain_bounded(input: impl Read, terminator: Option<u8>) -> Option<String> {
+		let mut reader = BoundedSearchReader { inner: input, terminator, run: 0 };
+		let mut buf = vec![0u8; 64 * 1024];
+		loop {
+			match reader.read(&mut buf) {
+				Ok(0) => return None,
+				Ok(_) => {},
+				Err(error) => {
+					assert!(
+						error.get_ref().is_some_and(|inner| inner.is::<LineLimitExceeded>()),
+						"untyped error: {error}"
+					);
+					return Some(describe_search_error(&error));
+				},
+			}
+		}
+	}
+
+	/// The bound counts the unterminated run, including one that a terminator
+	/// later in the same read closes: a line one byte over fails with the typed
+	/// error whether or not it is ever terminated, and a terminator resets it.
+	#[test]
+	fn line_bound_fails_one_byte_past_the_limit_with_a_typed_error() {
+		let limit = MAX_LINE_BYTES as u64;
+		let line = || io::repeat(b'x').take(limit);
+
+		assert_eq!(drain_bounded(line().chain(&b"\n"[..]).chain(line()), Some(b'\n')), None);
+		let over = Some("line longer than 256 MiB, not searched".to_owned());
+		assert_eq!(drain_bounded(line().chain(&b"x"[..]), Some(b'\n')), over);
+		assert_eq!(drain_bounded(line().chain(&b"x\nshort\n"[..]), Some(b'\n')), over);
+		assert_eq!(
+			drain_bounded(line().chain(&b"\n"[..]).chain(line()).chain(&b"\n"[..]), None),
+			Some("file larger than 256 MiB, not searched".to_owned())
+		);
 	}
 
 	#[test]

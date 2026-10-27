@@ -338,3 +338,48 @@ describe("skill description failure caching and shutdown", () => {
 		expect(storedDescriptions(store.path)).toEqual([]);
 	}, 6_000);
 });
+
+describe("previewSkillDescription", () => {
+	it("keeps the budget for CJK text whose only space comes early (#17070)", () => {
+		const description = `用户点名 ASD-STE100、${"简化技术英语或讲人话时使用；".repeat(10)}`;
+		expect(previewSkillDescription(description)).toBe(`${description.slice(0, 99)}…`);
+	});
+
+	it("cuts English text at the last word boundary within the budget", () => {
+		const description = `Use this skill ${"when editing files ".repeat(10)}`;
+		expect(previewSkillDescription(description)).toBe(`Use this skill ${"when editing files ".repeat(4)}when…`);
+	});
+});
+
+describe("skill description compressor model selection", () => {
+	const authStorages: AuthStorage[] = [];
+
+	afterEach(() => {
+		for (const storage of authStorages.splice(0)) storage.close();
+	});
+
+	function modelKey(modelRoles: Record<string, string>): string | undefined {
+		const authStorage = createInMemoryAuthStorage();
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const settings = Settings.isolated({ modelRoles });
+		const registry = new ModelRegistry(
+			authStorage,
+			path.join(os.tmpdir(), `omp-skill-models-${Snowflake.next()}.yml`),
+			{
+				settings,
+			},
+		);
+		return createSkillDescriptionCompressor(registry, settings).modelKey();
+	}
+
+	it("uses the configured default for an unset smol role instead of the built-in smol chain", () => {
+		expect(modelKey({ default: "anthropic/claude-opus-4-5" })).toBe("anthropic/claude-opus-4-5");
+	});
+
+	it("prefers a configured smol role over the configured default", () => {
+		expect(modelKey({ default: "anthropic/claude-opus-4-5", smol: "anthropic/claude-haiku-4-5" })).toBe(
+			"anthropic/claude-haiku-4-5",
+		);
+	});
+});

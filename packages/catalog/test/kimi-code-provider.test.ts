@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const LIVE_K3 = {
 	id: "k3",
@@ -102,15 +105,16 @@ describe("Kimi Code provider catalog", () => {
 
 	it("prices $0-discovered rows instead of recording $0 in usage stats", async () => {
 		// /coding/v1/models carries no pricing: rows take their
-		// cost-fallback (k3 at the public K3 list; kimi-k2 at the K2 list;
-		// kimi-for-coding at the K2.7 Code line rate because K2.8 Preview
-		// has no public SKU).
+		// cost-fallback (k3 at the public K3 list, including its 5m cache
+		// write; kimi-k2 at the K2 list; kimi-for-coding at the K2.7 Code
+		// line rate because K2.8 Preview has no public SKU).
 		const models = await discover([LIVE_K3, { ...LIVE_K3, id: "kimi-for-coding" }, { ...LIVE_K3, id: "kimi-k2" }]);
 
 		expect(models.find(candidate => candidate.id === "k3")?.cost).toMatchObject({
 			input: 3,
 			output: 15,
 			cacheRead: 0.3,
+			cacheWrite: 3,
 		});
 		expect(models.find(candidate => candidate.id === "kimi-for-coding")?.cost).toMatchObject({
 			input: 0.95,
@@ -122,5 +126,39 @@ describe("Kimi Code provider catalog", () => {
 			output: 2.5,
 			cacheRead: 0.15,
 		});
+	});
+
+	it("bills K3 cache writes from the cold offline and failed-discovery catalogs", async () => {
+		await using temp = await TempDir.create("@kimi-code-cache-write-");
+		for (const strategy of ["offline", "online"] as const) {
+			const { models } = await resolveProviderModels(
+				{
+					...kimiCodeModelManagerOptions({
+						apiKey: "test-key",
+						fetch: async () => new Response(null, { status: 503 }),
+					}),
+					cacheDbPath: temp.join(`${strategy}.db`),
+				},
+				strategy,
+			);
+			for (const [id, expectedCost] of [
+				["k3", 3],
+				["k3-256k", 3],
+				["kimi-for-coding", 0],
+			] as const) {
+				const model = models.find(candidate => candidate.id === id);
+				if (!model) throw new Error(`Missing ${id} in ${strategy} catalog`);
+				const cost = calculateCost(model, {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 1_000_000,
+					totalTokens: 1_000_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				});
+				expect(cost.cacheWrite).toBe(expectedCost);
+				expect(cost.total).toBe(expectedCost);
+			}
+		}
 	});
 });

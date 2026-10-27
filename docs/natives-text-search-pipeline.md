@@ -134,11 +134,12 @@ The native bridge bounds in-flight delivery to eight batches and checks cancella
 1. Caller passes `GlobOptions` directly. `pattern` and `path` are required in the generated type.
 2. Rust resolves the search path through `iofs::resolve_search_dir` using the selected filesystem and normalizes the pattern via `glob_util::build_glob_pattern`, compiled into a walker-side `pi_walker::CompiledWalkGlob` filter. An empty/whitespace pattern becomes `"*"`.
 3. Entry source: a `pi_walker::WalkRequest` with the glob filter pushed down walker-side. `.cache(config.cache)` requests cached collection on provider-free native filesystems; `EmptyRecheck` can perform one fresh rescan when a sufficiently old cache hit filters to empty.
+   - Descendant links are not followed by default. `followLinks: true` uses the walker's cycle-safe `FollowLinks::Always` policy; the filesystem provider owns mount containment. Glob and find enable it only for explicit `skill://` roots and enforce the plugin/skill boundary in their URL filesystem.
 4. Filtering:
    - skip `.git` always;
    - `includeNodeModules`, when supplied, controls node-module inclusion; when omitted, inclusion is inferred from whether the pattern mentions `node_modules`;
    - apply glob match;
-   - apply `FileType` enum filtering after walker collection; symlink `File`/`Dir` filters resolve target metadata through the selected filesystem. This post-collection filter does not trigger empty-cache revalidation.
+   - apply `FileType` enum filtering after walker collection; symlink `File`/`Dir` filters resolve target metadata through the selected filesystem and retain its mtime and regular-file size on accepted matches. Dangling links are excluded by those target-type filters. This post-collection filter does not trigger empty-cache revalidation.
 5. Optional sort by mtime descending (`sortByMtime`), then path ascending, before truncating to `maxResults`. Callbacks receive the returned, ordered match set; `totalMatches` is its length, not an untruncated total.
 
 ### `fuzzyFind` flow

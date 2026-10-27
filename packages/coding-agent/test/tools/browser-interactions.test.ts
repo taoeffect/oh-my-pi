@@ -152,6 +152,55 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 		}
 	}, 30_000);
 
+	test("says why it could not count a timed-out selector's matches", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-uncountable" };
+		const tabName = `uncountable-${crypto.randomUUID()}`;
+		await prelude.invoke(
+			{
+				action: "open",
+				name: tabName,
+				url: `data:text/html,${encodeURIComponent("<!doctype html><p>Nothing here</p>")}`,
+			},
+			context,
+		);
+		try {
+			// The match-count probe and the zero-match watchdog both query through `page.$$`;
+			// replacing it on the tab's page makes every probe fail the way the endpoint's did.
+			// The replacement stays until the tab closes below.
+			const attempt = async (probe: string, timeout: number) => {
+				const result = await prelude.invoke(
+					{
+						action: "run",
+						name: tabName,
+						code: `page.$$ = ${probe};
+try {
+	await tab.click("#missing");
+	return "clicked";
+} catch (error) {
+	return error instanceof Error ? error.message : String(error);
+}`,
+						timeout,
+					},
+					context,
+				);
+				return valueFrom<string>(result);
+			};
+			// A probe that throws never counts toward the 2 s fail-fast, so the click runs to its deadline.
+			const thrown = await attempt(`async () => { throw new Error("probe refused"); }`, 3);
+			expect(thrown).toMatch(
+				/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/,
+			);
+			// A 12 s cell keeps the 8 s action deadline and leaves ~2 s past the 1 s probe wait
+			// before the whole-cell timeout.
+			const stalled = await attempt(`() => Promise.withResolvers().promise`, 12);
+			expect(stalled).toMatch(/; could not count matches: no answer within 1000ms$/);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
 	test("rejects promptly when a text-click candidate evaluation is aborted", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
@@ -244,6 +293,59 @@ return { fragments, clicked: await tab.evaluate(() => window.clicked), ternHit }
 				fragments: 2,
 				clicked: ["link"],
 				ternHit: "link",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+	test("clicks a shadow button through its own slotted content, still refusing a real overlay, on puppeteer and Tern", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-slotted-button" };
+		const tabName = `slotted-${crypto.randomUUID()}`;
+		// The slotted icon fills the button's centre, so the hit test lands on light-DOM content the button renders.
+		const slottedHtml = `<!doctype html><slot-button id="open"><span style="display:inline-flex;width:40px;height:40px">x</span></slot-button>
+<slot-button id="covered"><span style="display:inline-flex;width:40px;height:40px">x</span></slot-button>
+<div id="overlay" style="position:absolute;left:0;top:70px;width:300px;height:100px"></div>
+<script>
+customElements.define("slot-button", class extends HTMLElement {
+	constructor() {
+		super();
+		this.attachShadow({ mode: "open" }).innerHTML = '<style>:host{display:block;height:70px}button{width:120px;height:64px}</style><button id="' + this.id + '-inner"><slot></slot></button>';
+	}
+});
+window.clicked = [];
+document.addEventListener("click", event => clicked.push(event.composedPath().find(node => node.localName === "button")?.id));
+</script>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(slottedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const open = await tab.click("pierce/#open-inner").then(() => "clicked", error => error.message);
+const covered = await tab.click("pierce/#covered-inner").then(() => "clicked", error => error.message);
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const tern = await tab.evaluate(async () => {
+	const aim = async query => {
+		const target = await globalThis.__ompTernKit.target({ engine: "pierce", query }, "click");
+		return target.ok ? "ok" : target.detail;
+	};
+	return { open: await aim("#open-inner"), covered: await aim("#covered-inner") };
+});
+return { open, covered, clicked: await tab.evaluate(() => window.clicked), tern };`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				open: "clicked",
+				covered: 'tab.click("pierce/#covered-inner") blocked: covered by <div#overlay>',
+				clicked: ["open-inner"],
+				tern: { open: "ok", covered: "<div#overlay>" },
 			});
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
@@ -600,6 +702,53 @@ return { value: await tab.value("#q"), reported: await tab.evaluate(() => window
 				value: "",
 				reported: ["input:", "change:"],
 			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	// Regression (#16833): a long fill/type that hits its per-op deadline used to reject while
+	// Puppeteer kept typing the rest, and blamed actionability for a field that was taking input.
+	test("stops typing when a long fill or type times out and reports how far it got", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `long-type-${crypto.randomUUID()}`;
+		const context = { session, toolCallId: "browser-long-type" };
+		await prelude.invoke(
+			{
+				action: "open",
+				name: tabName,
+				url: `data:text/html,${encodeURIComponent("<textarea id=area></textarea>")}`,
+			},
+			context,
+		);
+		const run = async <T>(code: string): Promise<T> =>
+			valueFrom<T>(await prelude.invoke({ action: "run", name: tabName, code, timeout: 3 }, context));
+		const readLength = `return (await tab.value("#area")).length;`;
+		try {
+			for (const action of ["fill", "type"]) {
+				await run(`await tab.evaluate(() => { document.querySelector("#area").value = ""; });`);
+				// A 3 s cell caps the per-op deadline at 2 s, far short of typing 20,000 characters.
+				const message = await run<string>(`try {
+	await tab.${action}("#area", "x".repeat(20000));
+	return "typed";
+} catch (error) {
+	return error.message;
+}`);
+				expect(message).toMatch(
+					new RegExp(
+						`^tab\\.${action}\\("#area"\\) timed out after \\d+ms; typing stopped after \\d+ of 20000 characters`,
+					),
+				);
+				// Real Chromium input cannot run under fake timers, and "no more keys arrive" is only
+				// observable over wall time. One key in flight at the deadline may still land; nothing after it.
+				await Bun.sleep(300);
+				const settled = await run<number>(readLength);
+				await Bun.sleep(1000);
+				expect(settled).toBeGreaterThan(0);
+				expect(settled).toBeLessThan(20000);
+				expect(await run<number>(readLength)).toBe(settled);
+			}
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}

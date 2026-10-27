@@ -32,6 +32,7 @@ import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tool
 import { isRawSelector, type ParsedSelector, resolveTailSelector, selToOffsetLimit } from "./read-selector";
 import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { TruncationMetaInput } from "./output-meta";
 import { toolResult } from "./tool-result";
 
 import { cfgReadRenderMarkdown } from "./settings";
@@ -39,6 +40,20 @@ import { cfgReadRenderMarkdown } from "./settings";
 export function toReadTruncationStats(result: TruncationResult): ReadTruncationStats {
 	const { content: _content, ...stats } = result;
 	return stats;
+}
+
+/** Keep descriptive diagnostics out of raw source text while retaining them in the result. */
+export function appendReadNotice(text: string, notice: string, details: ReadToolDetails, separator = "\n"): string {
+	if (details.raw) {
+		(details.notes ??= []).push(notice);
+		return text;
+	}
+	return text ? `${text}${separator}${notice}` : notice;
+}
+
+/** Carry raw mode through readers that pass suffix-resolution metadata to the shared prefix emitter. */
+export function markRawSuffixResolution(resolution: ReadToolDetails["suffixResolution"], raw: boolean): void {
+	if (resolution && raw) resolution.raw = true;
 }
 
 function prependLineNumbers(text: string, startNum: number): string {
@@ -321,6 +336,7 @@ export async function buildInMemoryTextResult(
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
 	const rawDisplay = options.raw === true;
+	if (rawDisplay) details.raw = true;
 	// Raw mode addresses verbatim `\n` segments and shows no block context, so it
 	// slices the window straight out of `text`; only addressable reads need every line.
 	const allLines = rawDisplay ? undefined : splitAddressableFileLines(text);
@@ -343,9 +359,8 @@ export async function buildInMemoryTextResult(
 		!rawDisplay && offset !== undefined && offset > 1,
 		!rawDisplay && limit !== undefined,
 	);
-	const startLine = expanded.startLine;
-	const endLineExpanded = expanded.endLine;
-	const startLineDisplay = startLine + 1;
+	let startLine = expanded.startLine;
+	const endLine = expanded.endLine;
 
 	const resultBuilder = toolResult(details);
 	if (options.sourcePath) {
@@ -363,18 +378,14 @@ export async function buildInMemoryTextResult(
 			totalLines === 0
 				? `The ${options.entityLabel} is empty.`
 				: `Use :1 to read from the start, or :${totalLines} to read the last line.`;
-		return resultBuilder
-			.text(
-				`Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${totalLines} lines total). ${suggestion}`,
-			)
-			.done();
+		const notice = `Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${totalLines} lines total). ${suggestion}`;
+		return resultBuilder.text(appendReadNotice("", notice, details)).done();
 	}
 
-	const endLine = endLineExpanded;
 	// Measure the range as a substring of `text` (equal to joining it) so a large range isn't
 	// copied only for `truncateHead` to keep its head. Branches that emit the whole range
 	// re-join it so the result never pins `text` through a substring.
-	const selectedRange = allLines
+	let selectedRange = allLines
 		? sliceLineRange(text, allLines, startLine, endLine)
 		: sliceRawLineRange(
 				text,
@@ -382,10 +393,24 @@ export async function buildInMemoryTextResult(
 				endLine,
 				limit === undefined && endLine === totalLines && text.endsWith("\n"),
 			);
+	let truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
+	// The leading context line must not cost the requested start line: when the byte budget
+	// stops at or inside it, `:<start>` would widen to the same context and repeat this page.
+	// The whole text is in memory, so drop the context and page from the requested line.
+	if (
+		allLines &&
+		startLine < requestedStart &&
+		(truncation.firstLineExceedsLimit ||
+			(truncation.truncated && (truncation.outputLines ?? 0) <= requestedStart - startLine))
+	) {
+		startLine = requestedStart;
+		selectedRange = sliceLineRange(text, allLines, startLine, endLine);
+		truncation = truncateHead(selectedRange);
+	}
+	const startLineDisplay = startLine + 1;
 	const joinSelectedLines = (): string =>
 		(allLines ? allLines.slice(startLine, endLine) : selectedRange.split("\n")).join("\n");
 	const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
-	const truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
 	// Any display short of the whole text shows block context around it.
 	if (
 		!rawDisplay &&
@@ -444,9 +469,7 @@ export async function buildInMemoryTextResult(
 		});
 
 	let outputText: string;
-	let truncationInfo:
-		| { result: TruncationResult; options: { direction: "head"; startLine?: number; totalFileLines?: number } }
-		| undefined;
+	let truncationInfo: { result: TruncationResult; options: TruncationMetaInput } | undefined;
 
 	if (truncation.firstLineExceedsLimit) {
 		const firstLine = allLines ? (allLines[startLine] ?? "") : selectedRange.split("\n", 1)[0];
@@ -484,7 +507,13 @@ export async function buildInMemoryTextResult(
 		details.truncation = toReadTruncationStats(truncation);
 		truncationInfo = {
 			result: truncation,
-			options: { direction: "head", startLine: startLineDisplay, totalFileLines: totalLines },
+			// Without `maxBytes` the notice reports the bytes shown as the limit.
+			options: {
+				direction: "head",
+				startLine: startLineDisplay,
+				totalFileLines: totalLines,
+				maxBytes: DEFAULT_MAX_BYTES,
+			},
 		};
 	} else if (!rawDisplay && userLimitedLines !== undefined && startLine + userLimitedLines < totalLines) {
 		const remaining = totalLines - (startLine + userLimitedLines);
@@ -534,6 +563,7 @@ export async function buildInMemoryMultiRangeResult(
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
+	if (options.raw) details.raw = true;
 	// Raw mode only emits the requested windows, so it never splits the whole text.
 	const allLines = options.raw === true ? undefined : splitAddressableFileLines(text);
 	const totalLines = allLines ? allLines.length : countRawLines(text);
@@ -585,7 +615,7 @@ export async function buildInMemoryMultiRangeResult(
 
 	let outputText = "";
 	if (!allLines) {
-		outputText = rawParts.length > 0 ? rawParts.join("\n\n…\n\n") : "";
+		outputText = rawParts.join("\n");
 	} else if (visibleSpans.length > 0) {
 		if (options.sourcePath && !spansCoverEveryLine(visibleSpans, totalLines)) {
 			await warmBlockContext({ path: options.sourcePath, text });
@@ -609,8 +639,7 @@ export async function buildInMemoryMultiRangeResult(
 		const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}`;
 		notices.push(`[Range ${bound} is beyond end of ${options.entityLabel} (${totalLines} lines total); skipped]`);
 	}
-	const finalText =
-		notices.length > 0 ? (outputText ? `${outputText}\n${notices.join("\n")}` : notices.join("\n")) : outputText;
+	const finalText = notices.length > 0 ? appendReadNotice(outputText, notices.join("\n"), details) : outputText;
 	if (hashContext?.tag && options.sourcePath && seenLines) {
 		getEditStore(session).recordSeenLines(options.sourcePath, hashContext.tag, seenLines);
 	}
@@ -630,8 +659,11 @@ export function decodeUtf8Text(bytes: Uint8Array): string | null {
 	}
 }
 
-export function prependSuffixResolutionNotice(text: string, suffixResolution?: { from: string; to: string }): string {
-	if (!suffixResolution) return text;
+export function prependSuffixResolutionNotice(
+	text: string,
+	suffixResolution?: ReadToolDetails["suffixResolution"],
+): string {
+	if (!suffixResolution || suffixResolution.raw) return text;
 
 	const notice = `[Path '${suffixResolution.from}' not found; resolved to '${suffixResolution.to}' via suffix match]`;
 	return text ? `${notice}\n${text}` : notice;

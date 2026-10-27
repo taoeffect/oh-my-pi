@@ -869,7 +869,33 @@ mod read {
 	}
 
 	pub fn json_array(fs: &BlockingFs, path: &Path) -> io::Result<Val> {
-		parse_many(&load_file(fs, path)?).map(|r| r.map_err(invalid_data)).collect()
+		parse_many(json_bytes(&load_file(fs, path)?)).map(|r| r.map_err(invalid_data)).collect()
+	}
+
+	/// Ignore one UTF-8 BOM at the start of each JSON input, never within a value.
+	fn json_bytes(bytes: &[u8]) -> &[u8] {
+		bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+	}
+
+	/// Peek at most three bytes, including across short buffers, without copying the input.
+	fn json_reader(mut read: impl BufRead) -> io::Result<impl BufRead> {
+		let mut prefix = [0; 3];
+		let mut len = 0;
+		while len < prefix.len() {
+			let available = read.fill_buf()?;
+			let n = available.len().min(prefix.len() - len);
+			if n == 0 {
+				break;
+			}
+			prefix[len..len + n].copy_from_slice(&available[..n]);
+			read.consume(n);
+			len += n;
+			if prefix[..len] != b"\xef\xbb\xbf"[..len] {
+				break;
+			}
+		}
+		let keep = if prefix == *b"\xef\xbb\xbf" { 0 } else { len };
+		Ok(io::Cursor::new(prefix).take(keep as u64).chain(read))
 	}
 
 	pub type Vals<'a> = Box<dyn Iterator<Item = io::Result<Val>> + 'a>;
@@ -950,7 +976,7 @@ mod read {
 				if raw || count_lines {
 					values(raw, &bytes[..], lines, count_lines)
 				} else {
-					Box::new(parse_many(bytes).map(|r| r.map_err(invalid_data)))
+					Box::new(parse_many(json_bytes(bytes)).map(|r| r.map_err(invalid_data)))
 				}
 			})
 		});
@@ -984,10 +1010,14 @@ mod read {
 	) -> Vals<'a> {
 		if raw {
 			Box::new(RawLines { read, lines })
-		} else if count_lines {
-			Box::new(read_many(LineFeed { read, line: Vec::new(), pos: 0, lines }))
 		} else {
-			Box::new(read_many(read))
+			match json_reader(read) {
+				Ok(read) if count_lines => {
+					Box::new(read_many(LineFeed { read, line: Vec::new(), pos: 0, lines }))
+				},
+				Ok(read) => Box::new(read_many(read)),
+				Err(error) => Box::new(core::iter::once(Err(error))),
+			}
 		}
 	}
 
@@ -1067,6 +1097,27 @@ mod read {
 			Box::new(core::iter::once_with(move || iter.collect()))
 		} else {
 			Box::new(iter)
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::io::{BufReader, Cursor, Read};
+
+		#[test]
+		fn json_bom_can_span_input_buffers_without_losing_other_prefixes() {
+			for input in [
+				&b"\xef\xbb\xbf{\"ok\":true}"[..],
+				&b"123"[..],
+				&b"\xef"[..],
+				&b"\xef\xbb"[..],
+				&b"\xef\xbb\xbf\xef\xbb\xbf1"[..],
+			] {
+				let mut read = super::json_reader(BufReader::with_capacity(1, Cursor::new(input))).unwrap();
+				let mut output = Vec::new();
+				read.read_to_end(&mut output).unwrap();
+				assert_eq!(output, super::json_bytes(input));
+			}
 		}
 	}
 }

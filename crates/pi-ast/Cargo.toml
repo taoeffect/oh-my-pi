@@ -10,6 +10,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["wasm"]
+# Grammars outside the linked set load as WebAssembly (src/language/grammar.rs).
+# Pulls wasmtime + cranelift (and cmake at build time); off, such grammars report
+# `GrammarError::Invalid` and the 17 linked grammars work unchanged.
+wasm = ["tree-sitter/wasm"]
+
 [dependencies]
 anyhow.workspace = true
 ast-grep-core.workspace = true
@@ -17,8 +24,7 @@ globset.workspace = true
 ignore.workspace = true
 phf.workspace = true
 serde.workspace = true
-# `wasm`: grammars outside the linked set load as WebAssembly (src/language/grammar.rs).
-tree-sitter = { workspace = true, features = ["wasm"] }
+tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-c.workspace = true
 tree-sitter-cpp.workspace = true

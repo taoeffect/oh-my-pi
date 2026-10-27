@@ -139,8 +139,8 @@ async function devinRequest(model: Model<"devin-agent">, messages: Message[]) {
 	await streamDevin(model, { messages }, { apiKey: "token", fetch: fetchImpl }).result();
 	if (!requestPayload) throw new Error("Devin chat request was not captured");
 	const view = new DataView(requestPayload.buffer, requestPayload.byteOffset, requestPayload.byteLength);
-	const compressed = requestPayload.subarray(5, 5 + view.getUint32(1, false));
-	return fromBinary(GetChatMessageRequestSchema, gunzipSync(compressed));
+	const message = requestPayload.subarray(5, 5 + view.getUint32(1, false));
+	return fromBinary(GetChatMessageRequestSchema, requestPayload[0] & 0x01 ? gunzipSync(message) : message);
 }
 
 const moonshotK3 = () => target("openai-completions", "moonshot", "kimi-k3");

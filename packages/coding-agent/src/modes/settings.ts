@@ -35,7 +35,8 @@ export const cfgAutoResume = register({
 		tab: "interaction",
 		group: "Startup & Updates",
 		label: "Auto Resume",
-		description: "Automatically resume the most recent session in the current directory",
+		description:
+			"Automatically resume the most recent session in the current directory. If its model cannot be restored and model fallback is disabled, interactive startup warns and starts a new session without the saved history",
 	},
 });
 
@@ -385,6 +386,19 @@ export const cfgTuiResizeScrollback = register({
 				description: "Repaint only the viewport and keep history wrapped at its old width",
 			},
 		],
+	},
+});
+
+export const cfgTuiCompleteScrollback = register({
+	id: "tui.completeScrollback",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Complete Scrollback",
+		description:
+			"Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback; when it shrinks, blank rows sit between the transcript and the input until new output fills them",
 	},
 });
 

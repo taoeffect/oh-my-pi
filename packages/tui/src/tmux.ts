@@ -150,3 +150,33 @@ export function tmuxClientRendersSixel(env: NodeJS.ProcessEnv = Bun.env): boolea
 	if (cachedClientSixel?.tmux !== tmux) cachedClientSixel = { tmux, renders: queryTmuxClientRendersSixel(env) };
 	return cachedClientSixel.renders;
 }
+
+let cachedPanePassthrough: { key: string; allowed: boolean } | undefined;
+
+function queryTmuxPaneAllowsPassthrough(env: NodeJS.ProcessEnv): boolean {
+	const pane = env.TMUX_PANE;
+	const target = pane ? ["-t", pane] : [];
+	const value = runTmux(["show-options", "-Apqv", ...target, "allow-passthrough"], env)?.trim();
+	if (value === undefined) return false;
+	// tmux before 3.3 has no `allow-passthrough` option (`-q` prints nothing)
+	// and always forwards DCS passthrough.
+	return value === "" || value === "on" || value === "all";
+}
+
+/**
+ * Whether tmux forwards this pane's `\x1bPtmux;…\x1b\\` passthrough envelopes
+ * to the attached client. tmux 3.3+ defaults `allow-passthrough` to `off` and
+ * then silently drops every wrapped sequence, so Kitty graphics sent through
+ * the envelope never reach a Kitty-capable outer terminal. Resolves the
+ * effective pane value (pane → window → global). Queried once per pane;
+ * `false` outside tmux or when the query fails.
+ */
+export function tmuxPaneAllowsPassthrough(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	const tmux = env.TMUX;
+	if (!tmux) return false;
+	const key = `${tmux}\0${env.TMUX_PANE ?? ""}`;
+	if (cachedPanePassthrough?.key !== key) {
+		cachedPanePassthrough = { key, allowed: queryTmuxPaneAllowsPassthrough(env) };
+	}
+	return cachedPanePassthrough.allowed;
+}

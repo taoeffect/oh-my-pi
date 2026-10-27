@@ -65,7 +65,8 @@ Most operations return a text result built by `buildTextResult()` in `packages/c
   - `pr_checkout` adds `checkouts: GhPrCheckoutSummary[]`, including `reused` and optional `clonedWith`.
   - `run_watch` adds `watch: GhRunWatchViewDetails`, which drives the custom live/result renderer in `packages/tui/src/tools/github.ts`.
 - Artifact trailer: when `artifactId` is present, the text body gets an appended line like `Full failed-job logs: artifact://<id>`.
-  - `run_watch` allocates artifacts with `session.allocateOutputArtifact("github")`; persistent sessions therefore save failed-log bodies as `<artifact-dir>/<id>.github.log`.
+  - `run_watch` uses `Full failed-job logs` only when every failed job has a complete log capture, `Partial failed-job logs` when some logs are missing or a capture is truncated, and `Failed-job log diagnostics` when none have content. Unavailable entries name the failed job and explain the fetch failure.
+  - Artifacts are allocated with `session.allocateOutputArtifact("github")`; persistent sessions save captured logs and diagnostics as `<artifact-dir>/<id>.github.log`.
 
 - `run_watch` is the only streaming op. It emits `onUpdate` snapshots while polling, then returns one final text result. Empty search results and commit watches that find no runs are marked `useless: true`.
 
@@ -84,7 +85,7 @@ Most operations return a text result built by `buildTextResult()` in `packages/c
 6. PR diffs use `pr://<N>/diff` (changed files), `pr://<N>/diff/<i>` (one file, 1-indexed), or `pr://<N>/diff/all` (full unified diff) — see [read](read.md). All variants share the `pr-diff` cache row; a fresh fetch normally runs `gh pr diff`, with a files-API fallback for oversized aggregate diffs.
 7. `pr_checkout` resolves PR metadata first, then enters `withRepoLock()` (`packages/coding-agent/src/utils/repo-lock.ts`) before any git mutation so parallel checkout calls for the same primary repo do not race on shared `.git` state.
 8. `pr_push` reads PR head metadata back from git branch config, derives a refspec, pushes with `repository.push()` (`@oh-my-pi/pi-natives/vcs`), then invalidates the cached `pr://` rows for the pushed PR via `invalidateAllForNumber()` so the next `pr://` read reflects the push.
-9. `pr_create` shells out once, then best-effort re-reads the created PR for a richer summary.
+9. `pr_create` shells out once, then best-effort fetches only the created PR's summary metadata.
 10. `run_watch` chooses either run mode (`run` supplied) or commit mode (`run` omitted), polls GitHub Actions APIs every 3 seconds for the first minute and every 15 seconds after that, emits streaming updates, and may save a full failed-log artifact before returning.
 11. Final text goes through `toolResult().text(...)`; if `session.allocateOutputArtifact()` returns a slot, failed-log text is persisted with `Bun.write()`.
 
@@ -124,12 +125,13 @@ Single-issue and single-PR reads live in the `issue://<N>` / `pr://<N>` URL sche
 | Optional fields | `repo`, `title`, `body`, `base`, `head`, `draft`, `fill`, `reviewer[]`, `assignee[]`, `label[]` |
 | `gh` command | `gh pr create ...` with flags assembled from provided fields |
 | Batching | None |
-| Output | `# Created Pull Request ...` summary with URL, state, draft flag, base/head, author, created time, labels, optional body. `sourceUrl` is the created PR URL. |
+| Output | `# Created Pull Request ...` summary with URL, state, draft flag, base/head, author, created time, and labels. The body is not echoed. `sourceUrl` is the created PR URL. |
 
 Branches:
 - `fill && (title || body !== undefined)` throws.
 - Non-empty `body` is written under a temp dir `gh-pr-body-*` in `os.tmpdir()`, passed as `--body-file`, then removed in `finally`.
-- After creation, the tool parses the returned URL and best-effort runs `gh pr view <number> --repo <repo> --json <GH_PR_FIELDS_NO_COMMENTS>`; failures there are swallowed.
+- After creation, the tool parses the returned URL and best-effort runs `gh pr view <number> --repo <repo> --json <GH_PR_CREATE_FIELDS>`, requesting only the summary fields above, not bodies, files, or reviews. Lookup failure still returns the creation URL and available input metadata.
+- `xd://github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
 
 ### `pr_checkout`
 
@@ -238,7 +240,7 @@ Push target resolution reads the `branch.<name>.ompPrHeadRef`, `pushRemote`/`rem
 | Optional fields | `repo`, `branch`, `run`, `tail` |
 | `gh` command | Repo resolution: `gh repo view --json url -q .url` when `repo` and run URL repo are both absent. Single-run mode uses `gh api --method GET /repos/<repo>/actions/runs/<runId>` and `gh api --method GET /repos/<repo>/actions/runs/<runId>/jobs`. Commit mode uses `gh api --method GET /repos/<repo>/branches/<branch>`, `gh api --method GET /repos/<repo>/actions/runs`, `gh api --method GET /repos/<repo>/actions/runs/<runId>/jobs`, and `gh api /repos/<repo>/actions/jobs/<jobId>/logs` for failed jobs. |
 | Batching | Implicit batching only in commit mode: all workflow runs for one commit are tracked together. |
-| Output | Streaming snapshots via `onUpdate`, then a final text report. When failed-job logs are collected and artifact allocation succeeds, appends `Full failed-job logs: artifact://<id>` and sets `details.artifactId`. |
+| Output | Streaming snapshots via `onUpdate`, then a final text report. When artifact allocation succeeds, sets `details.artifactId` and appends an artifact reference labeled as full logs, partial logs, or diagnostics according to captured log availability. |
 
 Watch flow:
 - `run` parsing accepts either a decimal run ID or a full run URL. URL repo must match explicit `repo` when both are given.
@@ -246,16 +248,16 @@ Watch flow:
 - Run conclusions `success`, `neutral`, and `skipped` count as success. A completed single run returns immediately; only commit mode performs the extra confirmation poll.
 - Poll interval is `3` seconds (`RUN_WATCH_INTERVAL_DEFAULT`) for the first `60` seconds of the watch (`RUN_WATCH_FAST_WINDOW_MS`), then `15` seconds (`RUN_WATCH_INTERVAL_SLOW`). Rate-limited poll errors back off at the slow interval and are retried up to `5` consecutive failures (`RUN_WATCH_MAX_POLL_FAILURES`). Commit mode gives up with a clear message after `90` seconds if no runs ever appear (`RUN_WATCH_NO_RUNS_GIVE_UP_MS`).
 - Failure grace period is fixed at 5 seconds (`RUN_WATCH_GRACE_DEFAULT`). When any failed job appears before completion, the tool emits a note, waits once, re-fetches state, then collects logs so concurrent failures are included.
-- Failed-job logs are fetched with `gh api /repos/<repo>/actions/jobs/<jobId>/logs` via `github.run()`, not `json()`. Non-zero exit leaves `available: false` instead of failing the whole watch.
-- Inline result includes only the last `tail` lines per failed job. The saved artifact contains full logs (`mode: "full"`).
+- Failed-job logs are fetched with `gh api /repos/<repo>/actions/jobs/<jobId>/logs` via `github.run()`, not `json()`. Non-zero exit or empty output leaves `available: false` instead of failing the whole watch. Each unavailable entry retains a reason capped at 512 UTF-8 bytes, including exit status and stderr for failed commands.
+- Inline result includes only the last `tail` captured lines per failed job. The saved artifact contains the captured logs (`mode: "full"`) and identifies any jobs without logs, with the same failure reasons. The subprocess capture's structured truncation flag marks logs exceeding 8 MiB as partial in both the artifact label and its contents.
 - In commit mode, success is intentionally double-checked: once all known runs are successful, the tool waits one more poll interval and succeeds only if the set of run IDs is unchanged. This avoids returning before late workflow runs appear for the same commit.
-- `details.watch` drives a specialized renderer in `packages/tui/src/tools/github.ts`; non-watch results use the fallback summary renderer.
+- `details.watch` drives a specialized renderer in `packages/tui/src/tools/github.ts`; unavailable-log reasons are sanitized and flattened to one display row. Non-watch results use the fallback summary renderer.
 
 ## Side Effects
 - Filesystem
   - `pr_create` may create a temp dir under `os.tmpdir()` named `gh-pr-body-*`, write `body.md`, then remove the dir in `finally`.
   - `pr_checkout` may create worktree directories named `<pr-number>-<repo-hash>` under the base selected by `OMP_WORKTREE_DIR`, then `worktree.base`, then the profile/XDG-aware default (normally `~/.omp/wt`), and add git worktrees there.
-  - `run_watch` may write a session artifact with full failed-job logs.
+  - `run_watch` may write a session artifact with captured failed-job logs and/or fetch diagnostics.
 - Network
   - Every op shells out to `gh`, which then talks to GitHub APIs except `pr_push`.
   - `pr_push` uses git network transport to the configured remote.
@@ -305,7 +307,7 @@ Watch flow:
   - PR identifiers beginning with `-`
   - an absolute `file_read` path (a leading `/`) or a contents-API response that is not a file
   - `run_watch` without `branch` / `run` when the current checkout does not match the requested repo
-- `run_watch` treats failed-job log fetches specially: missing log content does not fail the watch; it marks that log `available: false` and prints `Log tail unavailable.` / `Full log unavailable.`.
+- `run_watch` treats failed-job log fetches specially: missing log content does not fail the watch; it marks that log `available: false` and prints `Log tail unavailable.` / `Full log unavailable.` with a bounded reason. Artifact labels distinguish full, partial, and unavailable logs in both watch modes.
 - `pr_create` swallows only the post-create best-effort `gh pr view` refresh; the create step itself still fails normally.
 
 ## Notes

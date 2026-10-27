@@ -112,6 +112,26 @@ describe("dialogs under a native surface", () => {
 		expect(onSubmit.mock.calls[0]?.[0].results[1].selectedOptions).toEqual(["Yes"]);
 	});
 
+	it("ask: Next after a cancelled Other moves on to the review instead of reopening the editor", async () => {
+		const onPrompt = vi.fn(async () => undefined);
+		const dialog = new AskDialogComponent(QUESTIONS, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+		dialog.handleInput(ENTER);
+		const options = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
+		dialog.handleNativeEvent({ type: "activate", key: options!.path, item: "other" });
+		// The dialog awaits this same promise first, so its cancel handling has run once it settles.
+		await onPrompt.mock.results[0]?.value;
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		const answers = find(dialog.describe(CX), node => node.p?.role === "omp.ask.answers")?.node.p as
+			| { items: { k: string; v: { t: string }[] }[] }
+			| undefined;
+		expect(answers?.items.map(entry => [entry.k, entry.v.map(part => part.t).join("")])).toEqual([
+			["policy", "Park them"],
+			["flag", "Unanswered"],
+		]);
+	});
+
 	it("ask: docks in place of the composer instead of a modal sheet over the transcript", async () => {
 		// A modal bottom sheet hid the transcript rows explaining the question and blocked scrolling.
 		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this decision") };

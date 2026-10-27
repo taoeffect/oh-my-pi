@@ -66,16 +66,48 @@ export function nativeJudgmentSupportsImages(model: Model): boolean {
 	return isJudgmentApi(model.api) && JUDGMENT_WIRES[model.api].images !== undefined && model.input.includes("image");
 }
 
+/** Whether `model`'s native judgment takes images and its wire forwards box questions. The model itself may still refuse them (Box needs Jev 1.14+). */
+export function nativeJudgmentSupportsBoxes(model: Model): boolean {
+	return nativeJudgmentSupportsImages(model) && isJudgmentApi(model.api) && JUDGMENT_WIRES[model.api].boxes === true;
+}
+
 /**
- * Whether `model`'s native judgment API takes these exact images: image support plus every documented
- * transport and catalog bound. A judge chain skips a candidate that would refuse them instead of failing on it.
+ * Every image bound `model`'s native judgment enforces: its wire's transport limits tightened by the
+ * catalog's model bounds. `undefined` when it takes no images. Native APIs reject images outside these
+ * rather than resizing them, so callers size images to them first.
  */
+export function nativeJudgmentImageBounds(model: Model): JudgmentImageInput | undefined {
+	if (!isJudgmentApi(model.api) || !model.input.includes("image")) return undefined;
+	const wire = JUDGMENT_WIRES[model.api].images;
+	if (wire === undefined) return undefined;
+	const catalog = resolveJudgmentImageInput(model);
+	return catalog === undefined ? wire : intersectImageInput(wire, catalog);
+}
+
+/** Whether `model`'s native judgment API takes these exact images: image support within every {@link nativeJudgmentImageBounds}. */
 export function nativeJudgmentAcceptsImages(model: Model, images: readonly ImageContent[]): boolean {
-	if (!isJudgmentApi(model.api) || !model.input.includes("image")) return false;
-	const wireLimits = JUDGMENT_WIRES[model.api].images;
-	if (wireLimits === undefined || imageLimitViolation(images, wireLimits) !== undefined) return false;
-	const modelLimits = resolveJudgmentImageInput(model);
-	return modelLimits === undefined || imageLimitViolation(images, modelLimits) === undefined;
+	const bounds = nativeJudgmentImageBounds(model);
+	return bounds !== undefined && imageLimitViolation(images, bounds) === undefined;
+}
+
+/** The bounds both `a` and `b` allow: shared MIME types, the lower of each cap, the higher of each floor. */
+function intersectImageInput(a: JudgmentImageInput, b: JudgmentImageInput): JudgmentImageInput {
+	const bounds: JudgmentImageInput = {};
+	const mimeTypes =
+		a.mimeTypes && b.mimeTypes
+			? a.mimeTypes.filter(type => b.mimeTypes?.includes(type))
+			: (a.mimeTypes ?? b.mimeTypes);
+	if (mimeTypes !== undefined) bounds.mimeTypes = mimeTypes;
+	for (const cap of ["maxCount", "maxBytes", "maxTotalBytes", "maxPixels", "maxSide"] as const) {
+		const limit = a[cap] === undefined ? b[cap] : b[cap] === undefined ? a[cap] : Math.min(a[cap], b[cap]);
+		if (limit !== undefined) bounds[cap] = limit;
+	}
+	for (const floor of ["minPixels", "minSide"] as const) {
+		const limit =
+			a[floor] === undefined ? b[floor] : b[floor] === undefined ? a[floor] : Math.max(a[floor], b[floor]);
+		if (limit !== undefined) bounds[floor] = limit;
+	}
+	return bounds;
 }
 
 /**
@@ -100,6 +132,23 @@ export function checkNativeJudgmentImages(
 		);
 	} else if ((request.images?.length ?? 0) > 0 || Object.keys(imageAssets ?? {}).length > 0) {
 		throw new AIError.ValidationError(`Native judgment backend ${label} does not support image inputs`);
+	}
+}
+
+/**
+ * Reject box questions whose `image` is not an index into `request.images`: nothing would say which
+ * image their edges measure.
+ * @throws {AIError.ValidationError} naming the question.
+ */
+export function checkBoxQuestions(request: JudgmentRequest): void {
+	const count = request.images?.length ?? 0;
+	for (const id in request.questions) {
+		const question = request.questions[id];
+		if (question.type !== "box") continue;
+		if (Number.isInteger(question.image) && question.image >= 0 && question.image < count) continue;
+		throw new AIError.ValidationError(
+			`judgment: box question "${id}" names image ${question.image}, but the request has ${count} images`,
+		);
 	}
 }
 
@@ -315,6 +364,13 @@ export class NativeJudge implements Judge {
 			options?.imageAssets,
 			this.#imageInput,
 		);
+		checkBoxQuestions(request);
+		if (this.#wire.boxes !== true) {
+			for (const id in request.questions) {
+				if (request.questions[id].type !== "box") continue;
+				throw new AIError.ValidationError(`Native judgment backend ${this.label} does not answer box questions`);
+			}
+		}
 		const ids = Object.keys(request.questions);
 		const cap = this.#maxQuestions;
 		if (cap !== undefined && ids.length > cap) return this.#judgeChunked(request, ids, cap, options);

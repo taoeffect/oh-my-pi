@@ -2,7 +2,8 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
-use brush_core::openfiles::OpenFile;
+use brush_core::{ErrorKind, openfiles::OpenFile};
+use tokio_util::sync::CancellationToken;
 
 /// Bytes per read-ahead.
 const BLOCK: usize = 4096;
@@ -71,6 +72,48 @@ impl LineInput {
 		self.blocks
 	}
 
+	/// Waits, without holding the runtime worker, until the next
+	/// [`Self::next_byte`] would not block, or fails with `Interrupted` once
+	/// `cancel` fires. A caller on the task that also runs `timeout` (or that
+	/// another task on the same worker must cancel) needs this: a blocking read
+	/// of input that pauses before a delimiter or EOF would stop that task from
+	/// reaching its deadline. Returns at once when the next byte is already
+	/// buffered or input is ready, and for input that cannot be polled
+	/// (regular files, the null device, provider files and in-process
+	/// streams), which is read as before.
+	pub(crate) async fn wait_for_input(
+		&self,
+		cancel: Option<&CancellationToken>,
+	) -> Result<(), brush_core::Error> {
+		if cancel.is_some_and(CancellationToken::is_cancelled) {
+			return Err(ErrorKind::Interrupted.into());
+		}
+		#[cfg(unix)]
+		if !self.blocks || self.pos == self.block.len() {
+			use tokio::io::{Interest, unix::AsyncFd};
+			let Ok(fd) = self.input.try_borrow_as_fd() else {
+				return Ok(());
+			};
+			if !pi_vfs::fd_reads_can_block(fd) || readable_now(fd)? {
+				return Ok(());
+			}
+			// A descriptor the reactor cannot watch is read as before.
+			let Ok(watched) = AsyncFd::with_interest(fd.try_clone_to_owned()?, Interest::READABLE) else {
+				return Ok(());
+			};
+			let readable = async { watched.readable().await.map(drop) };
+			let waited = match cancel {
+				Some(token) => token.run_until_cancelled(readable).await,
+				None => Some(readable.await),
+			};
+			return match waited {
+				Some(result) => Ok(result?),
+				None => Err(ErrorKind::Interrupted.into()),
+			};
+		}
+		Ok(())
+	}
+
 	/// The next byte, or `None` at end of input.
 	pub(crate) fn next_byte(&mut self) -> io::Result<Option<u8>> {
 		if !self.blocks {
@@ -103,6 +146,27 @@ impl LineInput {
 		{
 			self.block.clear();
 			self.pos = 0;
+		}
+	}
+}
+
+/// Whether a read of `fd` would not block now: one `poll` with no timeout.
+#[cfg(unix)]
+fn readable_now(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<bool> {
+	use std::os::fd::AsRawFd;
+	let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+	loop {
+		// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from a live
+		// descriptor for the whole call.
+		match unsafe { libc::poll(&mut pfd, 1, 0) } {
+			0 => return Ok(false),
+			ready if ready > 0 => return Ok(true),
+			_ => {
+				let error = io::Error::last_os_error();
+				if error.kind() != io::ErrorKind::Interrupted {
+					return Err(error);
+				}
+			},
 		}
 	}
 }

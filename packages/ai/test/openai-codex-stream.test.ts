@@ -5722,6 +5722,121 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it("starts an independent turn when the native turn lane rejects a chained request", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+
+		class NativeTurnInflightWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				const request = JSON.parse(data) as Record<string, unknown>;
+				sentRequests.push(request);
+				const requestIndex = sentRequests.length;
+
+				if (requestIndex === 1) {
+					this.emitCodexResponse({
+						messageId: "msg_1",
+						responseId: "resp_1",
+						text: "First answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				if (requestIndex === 2) {
+					expect(request.previous_response_id).toBe("resp_1");
+					this.sendJson({
+						type: "response.metadata",
+						headers: { "x-codex-turn-state": "busy-lane-turn-state" },
+					});
+					this.sendJson({
+						type: "error",
+						code: "unsupported_native_inflight_message",
+						message:
+							"The experimental native turn lane cannot accept stateful WebSocket messages while a native turn is running. Start a new independent response.create turn instead.",
+					});
+					return;
+				}
+
+				if (requestIndex === 3) {
+					expect(request.previous_response_id).toBeUndefined();
+					const metadata = requireRecord(request.client_metadata, "retry client_metadata");
+					expect(metadata["x-codex-turn-state"]).toBeUndefined();
+					this.emitCodexResponse({
+						messageId: "msg_3",
+						responseId: "resp_3",
+						text: "Second answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				throw new Error(`Unexpected websocket request index: ${requestIndex}`);
+			}
+		}
+
+		global.WebSocket = NativeTurnInflightWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const firstContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "First question", timestamp: Date.now() }],
+		};
+		const firstResponse = await streamOpenAICodexResponses(model, firstContext, {
+			fetch: fetchMock as FetchImpl,
+			apiKey: token,
+			sessionId: "ws-native-turn-inflight-session",
+			providerSessionState,
+		}).result();
+		const secondContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [
+				...firstContext.messages,
+				firstResponse,
+				{ role: "user", content: "Second question", timestamp: Date.now() + 1 },
+			],
+		};
+
+		const secondResponse = await streamOpenAICodexResponses(model, secondContext, {
+			fetch: fetchMock as FetchImpl,
+			apiKey: token,
+			sessionId: "ws-native-turn-inflight-session",
+			providerSessionState,
+		}).result();
+
+		expect(secondResponse.stopReason).toBe("stop");
+		expect(JSON.stringify(secondResponse.content)).toContain("Second answer");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sentRequests).toHaveLength(3);
+		const retryInput = sentRequests[2]?.input;
+		expect(Array.isArray(retryInput)).toBe(true);
+		expect(JSON.stringify(retryInput)).toContain("First question");
+		expect(JSON.stringify(retryInput)).toContain("Second question");
+
+		const stats = getOpenAICodexWebSocketDebugStats(model, {
+			sessionId: "ws-native-turn-inflight-session",
+			providerSessionState,
+		});
+		expect(stats).toMatchObject({
+			fullContextRequests: 2,
+			deltaRequests: 1,
+			lastInputItems: (retryInput as unknown[]).length,
+			lastDeltaInputItems: undefined,
+			lastPreviousResponseId: undefined,
+		});
+	});
+
 	it("waits for caller abort when a prewarmed websocket is silent before its first event", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
@@ -6765,6 +6880,118 @@ describe("openai-codex streaming", () => {
 			canAppend: false,
 		});
 	});
+
+	it.each(["while the first streams", "in the same tick"])(
+		"sends a same-session request started %s over SSE without closing the active websocket",
+		async start => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const token = createCodexTestToken();
+			const fetchMock = vi.fn(
+				async () =>
+					new Response(createStatefulCodexSse("Second over SSE", "resp_second"), {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			);
+
+			const sockets: HoldingWebSocket[] = [];
+			let closeCount = 0;
+			const firstSent = Promise.withResolvers<void>();
+			class HoldingWebSocket extends MockWebSocket {
+				constructor(url: string, options?: { headers?: WsHeaders }) {
+					super(url, options);
+					sockets.push(this);
+					this.scheduleOpen();
+				}
+
+				override send(): void {
+					if (this !== sockets[0]) {
+						this.emitCodexResponse({
+							messageId: "msg_other",
+							responseId: "resp_other",
+							text: "Second over websocket",
+						});
+						return;
+					}
+					// Start the response but hold its terminal event, so the first request
+					// keeps streaming while the second one arrives.
+					this.sendJson({
+						type: "response.output_item.added",
+						item: { type: "message", id: "msg_first", role: "assistant", status: "in_progress", content: [] },
+					});
+					this.sendJson({ type: "response.content_part.added", part: { type: "output_text", text: "" } });
+					this.sendJson({ type: "response.output_text.delta", delta: "First over websocket" });
+					firstSent.resolve();
+				}
+
+				override close(): void {
+					const wasOpen = this.readyState === MockWebSocket.OPEN;
+					closeCount += 1;
+					super.close();
+					if (wasOpen) setTimeout(() => this.emit("close", { code: 1000 } as unknown as Event), 0);
+				}
+
+				finishFirstResponse(): void {
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "message",
+							id: "msg_first",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "First over websocket" }],
+						},
+					});
+					this.sendJson({
+						type: "response.done",
+						response: { id: "resp_first", status: "completed", usage: DEFAULT_USAGE },
+					});
+				}
+			}
+			global.WebSocket = HoldingWebSocket as unknown as typeof WebSocket;
+
+			const model = createCodexTestModel("https://chatgpt.com/backend-api");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const options = {
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-overlap-session",
+				providerSessionState,
+			};
+
+			const firstResult = streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+			if (start === "while the first streams") await firstSent.promise;
+			const secondResult = streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+			await firstSent.promise;
+			// The request that lost the socket finishes on its own; then let any close
+			// it triggered reach the socket before the held response completes.
+			await Promise.race([firstResult, secondResult]);
+			await Bun.sleep(5);
+			sockets[0]?.finishFirstResponse();
+			const results = await Promise.all([firstResult, secondResult]);
+
+			// The socket owner finished on that socket, which nobody closed, and the
+			// other request went over SSE instead of opening a replacement socket.
+			expect(closeCount).toBe(0);
+			for (const result of results) {
+				expect(result.stopReason).toBe("stop");
+				expect(result.errorMessage).toBeUndefined();
+			}
+			expect(results.map(result => result.content.find(block => block.type === "text")?.text).sort()).toEqual([
+				"First over websocket",
+				"Second over SSE",
+			]);
+			expect(sockets).toHaveLength(1);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			const details = getOpenAICodexTransportDetails(model, {
+				sessionId: "ws-overlap-session",
+				providerSessionState,
+			});
+			expect(details.websocketDisabled).toBe(false);
+			expect(details.websocketConnected).toBe(true);
+		},
+	);
 
 	it("does not throw when closing a stale socket", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");

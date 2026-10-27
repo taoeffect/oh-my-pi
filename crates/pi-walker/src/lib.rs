@@ -97,12 +97,6 @@ pub enum FollowLinks {
 	Always,
 }
 
-impl From<bool> for FollowLinks {
-	fn from(follow: bool) -> Self {
-		if follow { Self::Always } else { Self::Never }
-	}
-}
-
 impl FollowLinks {
 	const fn follow_at_depth(self, depth: usize) -> bool {
 		match self {
@@ -229,6 +223,7 @@ pub struct WalkFilter {
 	skip_node_modules_unless_seen: bool,
 	mentions_node_modules: bool,
 	glob: Option<CompiledWalkGlob>,
+	exclude: Option<CompiledWalkGlob>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -252,6 +247,7 @@ impl fmt::Debug for WalkFilter {
 			.field("skip_node_modules_unless_seen", &self.skip_node_modules_unless_seen)
 			.field("mentions_node_modules", &self.mentions_node_modules)
 			.field("glob", &self.glob)
+			.field("exclude", &self.exclude)
 			.finish()
 	}
 }
@@ -263,6 +259,7 @@ impl PartialEq for WalkFilter {
 			&& self.skip_node_modules_unless_seen == other.skip_node_modules_unless_seen
 			&& self.mentions_node_modules == other.mentions_node_modules
 			&& self.glob == other.glob
+			&& self.exclude == other.exclude
 	}
 }
 
@@ -275,6 +272,7 @@ impl Hash for WalkFilter {
 		self.skip_node_modules_unless_seen.hash(state);
 		self.mentions_node_modules.hash(state);
 		self.glob.hash(state);
+		self.exclude.hash(state);
 	}
 }
 
@@ -287,6 +285,7 @@ impl WalkFilter {
 			skip_node_modules_unless_seen: false,
 			mentions_node_modules: false,
 			glob: None,
+			exclude: None,
 		}
 	}
 
@@ -298,6 +297,7 @@ impl WalkFilter {
 			skip_node_modules_unless_seen: false,
 			mentions_node_modules: false,
 			glob: None,
+			exclude: None,
 		}
 	}
 
@@ -309,6 +309,7 @@ impl WalkFilter {
 			skip_node_modules_unless_seen: false,
 			mentions_node_modules: false,
 			glob: None,
+			exclude: None,
 		}
 	}
 
@@ -331,6 +332,26 @@ impl WalkFilter {
 		self
 	}
 
+	/// Drop entries whose normalized relative path matches `exclude`: a matching
+	/// directory is not descended, so everything under it is dropped too.
+	pub fn exclude(mut self, exclude: CompiledWalkGlob) -> Self {
+		self.exclude = Some(exclude);
+		self
+	}
+
+	/// Whether `exclude` matches `relative_path` or one of its ancestor
+	/// directories. Collected walks gather every entry before filtering, so a
+	/// directory's `SkipDescend` prunes nothing there and its files must be
+	/// matched through their ancestors.
+	fn excluded(&self, relative_path: &str) -> bool {
+		self.exclude.as_ref().is_some_and(|exclude| {
+			exclude.is_match(relative_path)
+				|| relative_path
+					.match_indices('/')
+					.any(|(end, _)| exclude.is_match(&relative_path[..end]))
+		})
+	}
+
 	fn accepts_path(&self, relative_path: &str) -> bool {
 		self
 			.glob
@@ -339,56 +360,47 @@ impl WalkFilter {
 	}
 
 	fn accepts_collected(&self, entry: &CollectedEntry) -> bool {
-		if self.skip_node_modules_unless_seen
-			&& !self.mentions_node_modules
-			&& entry
-				.path
-				.split('/')
-				.any(|component| component == "node_modules")
-		{
-			return false;
-		}
-		if self.max_file_size.is_some_and(|max| {
-			entry.file_type == FileType::File && entry.size.is_some_and(|size| size > max as f64)
-		}) {
-			return false;
-		}
-		let accepts_kind = match self.kind {
-			WalkFilterKind::All => true,
-			WalkFilterKind::Files => entry.file_type == FileType::File,
-			WalkFilterKind::Dirs => entry.file_type == FileType::Dir,
-		};
-		accepts_kind && self.accepts_path(&entry.path)
+		self.decision(&entry.path, entry.file_type, entry.size) == WalkDecision::Include
 	}
 
 	fn stream_decision(&self, meta: &EntryMeta<'_>) -> WalkDecision {
+		self.decision(meta.relative_path, meta.file_type, meta.size)
+	}
+
+	fn decision(&self, relative_path: &str, file_type: FileType, size: Option<f64>) -> WalkDecision {
 		if self.skip_node_modules_unless_seen
 			&& !self.mentions_node_modules
-			&& meta
-				.relative_path
+			&& relative_path
 				.split('/')
 				.any(|component| component == "node_modules")
 		{
-			return if meta.file_type == FileType::Dir {
+			return if file_type == FileType::Dir {
+				WalkDecision::SkipDescend
+			} else {
+				WalkDecision::Skip
+			};
+		}
+		if self.excluded(relative_path) {
+			return if file_type == FileType::Dir {
 				WalkDecision::SkipDescend
 			} else {
 				WalkDecision::Skip
 			};
 		}
 		if self.max_file_size.is_some_and(|max| {
-			meta.file_type == FileType::File && meta.size.is_some_and(|size| size > max as f64)
+			file_type == FileType::File && size.is_some_and(|size| size > max as f64)
 		}) {
 			return WalkDecision::Skip;
 		}
 		let accepts_kind = match self.kind {
 			WalkFilterKind::All => true,
-			WalkFilterKind::Files => meta.file_type == FileType::File,
-			WalkFilterKind::Dirs => meta.file_type == FileType::Dir,
+			WalkFilterKind::Files => file_type == FileType::File,
+			WalkFilterKind::Dirs => file_type == FileType::Dir,
 		};
 		if !accepts_kind {
 			return WalkDecision::Skip;
 		}
-		if self.accepts_path(meta.relative_path) {
+		if self.accepts_path(relative_path) {
 			WalkDecision::Include
 		} else {
 			WalkDecision::Skip
@@ -524,6 +536,27 @@ pub enum WalkRank {
 	/// times. [`WalkRequest::collect_ranked_with_heartbeat`] requests full
 	/// metadata for this rank so fresh scans can populate the mtime field.
 	MtimeDescPathAsc,
+}
+
+impl WalkRank {
+	fn compare(
+		self,
+		left_path: &str,
+		left_mtime: Option<f64>,
+		right_path: &str,
+		right_mtime: Option<f64>,
+	) -> Ordering {
+		let mtime_order = match self {
+			Self::PathAsc => Ordering::Equal,
+			Self::MtimeDescPathAsc => match (left_mtime, right_mtime) {
+				(Some(left), Some(right)) => right.total_cmp(&left),
+				(Some(_), None) => Ordering::Less,
+				(None, Some(_)) => Ordering::Greater,
+				(None, None) => Ordering::Equal,
+			},
+		};
+		mtime_order.then_with(|| left_path.cmp(right_path))
+	}
 }
 
 /// Summary statistics for a high-level collection.
@@ -1271,20 +1304,7 @@ impl WalkRequest {
 	}
 
 	fn rank_entries(entries: &mut [CollectedEntry], rank: WalkRank) {
-		match rank {
-			WalkRank::PathAsc => entries.sort_by(|left, right| left.path.cmp(&right.path)),
-			WalkRank::MtimeDescPathAsc => entries.sort_by(Self::compare_mtime_desc_path_asc),
-		}
-	}
-
-	fn compare_mtime_desc_path_asc(left: &CollectedEntry, right: &CollectedEntry) -> Ordering {
-		let mtime_order = match (left.mtime, right.mtime) {
-			(Some(left_mtime), Some(right_mtime)) => right_mtime.total_cmp(&left_mtime),
-			(Some(_), None) => Ordering::Less,
-			(None, Some(_)) => Ordering::Greater,
-			(None, None) => Ordering::Equal,
-		};
-		mtime_order.then_with(|| left.path.cmp(&right.path))
+		entries.sort_by(|left, right| rank.compare(&left.path, left.mtime, &right.path, right.mtime));
 	}
 
 	fn effective_options(&self) -> WalkOptions {
@@ -2375,10 +2395,13 @@ struct RankedEntry {
 impl Ord for RankedEntry {
 	fn cmp(&self, other: &Self) -> Ordering {
 		match (self.rank, other.rank) {
-			(WalkRank::PathAsc, WalkRank::PathAsc) => self.entry.path.cmp(&other.entry.path),
-			(WalkRank::MtimeDescPathAsc, WalkRank::MtimeDescPathAsc) => {
-				WalkRequest::compare_mtime_desc_path_asc(&self.entry, &other.entry)
-			},
+			(WalkRank::PathAsc, WalkRank::PathAsc)
+			| (WalkRank::MtimeDescPathAsc, WalkRank::MtimeDescPathAsc) => self.rank.compare(
+				&self.entry.path,
+				self.entry.mtime,
+				&other.entry.path,
+				other.entry.mtime,
+			),
 			(WalkRank::PathAsc, WalkRank::MtimeDescPathAsc) => Ordering::Less,
 			(WalkRank::MtimeDescPathAsc, WalkRank::PathAsc) => Ordering::Greater,
 		}
@@ -2435,23 +2458,34 @@ impl EntryVisitor for RankedCollectVisitor<'_> {
 
 	fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
 		self.scanned += 1;
-		let entry = CollectedEntry {
-			path:      entry.relative.to_string(),
-			file_type: entry.file_type,
-			mtime:     entry.mtime,
-			size:      entry.size,
-		};
-		if !self.filter.accepts_collected(&entry) {
+		// Collection filters emission only: even SkipDescend must keep scanning.
+		if self
+			.filter
+			.decision(entry.relative, entry.file_type, entry.size)
+			!= WalkDecision::Include
+		{
 			self.filtered += 1;
 			return Ok(WalkControl::Continue);
 		}
-		let candidate = RankedEntry { entry, rank: self.rank };
+		// Allocates the owned path; call only once the entry is retained.
+		let owned_candidate = || RankedEntry {
+			entry: CollectedEntry {
+				path:      entry.relative.to_string(),
+				file_type: entry.file_type,
+				mtime:     entry.mtime,
+				size:      entry.size,
+			},
+			rank:  self.rank,
+		};
 		if self.entries.len() < self.limit {
-			self.entries.push(candidate);
+			self.entries.push(owned_candidate());
 		} else if let Some(mut worst) = self.entries.peek_mut()
-			&& candidate < *worst
+			&& self
+				.rank
+				.compare(entry.relative, entry.mtime, &worst.entry.path, worst.entry.mtime)
+				== Ordering::Less
 		{
-			*worst = candidate;
+			*worst = owned_candidate();
 		}
 		Ok(WalkControl::Continue)
 	}
@@ -2855,7 +2889,7 @@ impl<H> WalkContext<'_, H> {
 		let stopped =
 			if root_entry.file_type == FileType::Dir && self.options.max_depth > 0 && decision.descend
 			{
-				self.walk_dir(0, root_ignore, false, visitor)?
+				self.walk_tree(root_ignore, visitor)?
 			} else {
 				false
 			};
@@ -2914,74 +2948,46 @@ impl<H> WalkContext<'_, H> {
 		leave_child_path(&mut self.absolute_path, parent);
 	}
 
-	fn walk_dir<V>(
+	/// Walk everything below the root depth-first. Open directories live on a
+	/// heap stack rather than the call stack: native walks run on 2 MiB worker
+	/// threads, and a Windows path nests deep enough to exhaust one at a stack
+	/// frame per directory (#16857). Returns whether the visitor stopped the
+	/// walk.
+	fn walk_tree<V>(
 		&mut self,
-		depth: usize,
-		ignore_state: &Arc<IgnoreState>,
-		derive_ignore_from_entries: bool,
+		root_ignore: &Arc<IgnoreState>,
 		visitor: &mut V,
 	) -> std::result::Result<bool, WalkError<V::Error>>
 	where
 		V: EntryVisitor,
 		H: FnMut() -> std::result::Result<(), V::Error>,
 	{
-		if self.options.follow_links == FollowLinks::Always {
-			self.symlink_ancestors.push(self.absolute_path.clone());
-			let result = self.walk_dir_inner(depth, ignore_state, derive_ignore_from_entries, visitor);
-			self.symlink_ancestors.pop();
-			return result;
-		}
-
-		self.walk_dir_inner(depth, ignore_state, derive_ignore_from_entries, visitor)
-	}
-
-	fn walk_dir_inner<V>(
-		&mut self,
-		depth: usize,
-		ignore_state: &Arc<IgnoreState>,
-		derive_ignore_from_entries: bool,
-		visitor: &mut V,
-	) -> std::result::Result<bool, WalkError<V::Error>>
-	where
-		V: EntryVisitor,
-		H: FnMut() -> std::result::Result<(), V::Error>,
-	{
-		let mut scratch = self.take_scratch();
-		let ignore_entries = match collect_directory_entries(
-			self.fs,
-			&self.absolute_path,
-			self.options.listing_detail(depth),
-			&mut scratch,
-			&self.matcher,
-			derive_ignore_from_entries,
-		) {
-			Ok(ignore_entries) => ignore_entries,
-			Err(err) => {
-				let dir = self.absolute_path.clone();
-				self.recycle_scratch(scratch);
-				return handle_read_dir_error(&dir, err, self.options, visitor);
-			},
-		};
-		if self.options.order == WalkOrder::Path {
-			scratch.sort_by_name();
-		}
-		let dir_ignore = self.matcher.state_from_entries(
-			self.fs,
-			ignore_state,
-			&self.absolute_path,
-			ignore_entries,
-			derive_ignore_from_entries,
-		);
-
-		for index in 0..scratch.entries.len() {
+		let mut stack = DirStack(match self.open_dir(0, root_ignore, false, visitor)? {
+			DirOpen::Listed(frame) => vec![frame],
+			DirOpen::Skipped => return Ok(false),
+			DirOpen::Stopped => return Ok(true),
+		});
+		// A stop or error abandons the walk mid-tree; the context is discarded
+		// with it, so the paths and ancestors entered so far need no unwinding.
+		// `DirStack` releases the abandoned frames deepest-first.
+		while let Some(frame) = stack.last_mut() {
+			let index = frame.next;
+			if index == frame.scratch.entries.len() {
+				let finished = stack.pop().expect("loop holds a frame");
+				if self.leave_dir(finished, stack.last(), visitor)? {
+					return Ok(true);
+				}
+				continue;
+			}
+			frame.next += 1;
 			if self.visited == 0 || self.visited >= HEARTBEAT_INTERVAL {
 				self.visited = 0;
 				(self.heartbeat)().map_err(WalkError::Interrupted)?;
 			}
 			self.visited += 1;
 
-			let entry = &scratch.entries[index];
-			let name = scratch.name(entry);
+			let entry = &frame.scratch.entries[index];
+			let name = frame.scratch.name(entry);
 			if is_dot_entry(name) {
 				continue;
 			}
@@ -2998,33 +3004,168 @@ impl<H> WalkContext<'_, H> {
 			if name_str.is_empty() {
 				continue;
 			}
-			let next_depth = depth + 1;
+			let next_depth = frame.depth + 1;
 			if next_depth > self.options.max_depth {
 				continue;
 			}
 
-			let parent_lengths = self.push_entry_path(name, &name_str);
-			let entry_result = self.walk_current_entry(
+			let path = self.push_entry_path(name, &name_str);
+			let step = self.enter_entry(
 				name,
 				entry.file_type,
 				entry.mtime,
 				entry.size,
 				next_depth,
-				&dir_ignore,
+				&frame.ignore,
 				visitor,
-			);
-			self.pop_entry_path(parent_lengths);
-			if entry_result? {
-				self.recycle_scratch(scratch);
+			)?;
+			let (descend, post_visit) = match step {
+				EntryStep::Stop => return Ok(true),
+				EntryStep::Done(post_visit) => (false, post_visit),
+				EntryStep::Descend(post_visit) => (true, post_visit),
+			};
+			if descend {
+				let ignore = Arc::clone(&frame.ignore);
+				match self.open_dir(next_depth, &ignore, true, visitor)? {
+					DirOpen::Listed(mut child) => {
+						child.entry = Some(OpenedEntry { index, path, post_visit });
+						stack.push(child);
+						continue;
+					},
+					DirOpen::Stopped => return Ok(true),
+					DirOpen::Skipped => {},
+				}
+			}
+			let frame = stack.last().expect("entry belongs to the top frame");
+			let name = frame.scratch.name(&frame.scratch.entries[index]);
+			if let Some(post_visit) = post_visit
+				&& self.post_visit(name, post_visit, visitor)?
+			{
 				return Ok(true);
 			}
+			self.pop_entry_path(path);
 		}
-
-		self.recycle_scratch(scratch);
 		Ok(false)
 	}
 
-	fn walk_current_entry<V>(
+	/// List the directory at `absolute_path`, whose entries sit at
+	/// `depth + 1`, deriving its ignore state from `parent_ignore`. A listing
+	/// error goes through [`handle_read_dir_error`].
+	fn open_dir<V>(
+		&mut self,
+		depth: usize,
+		parent_ignore: &Arc<IgnoreState>,
+		derive_ignore_from_entries: bool,
+		visitor: &mut V,
+	) -> std::result::Result<DirOpen, WalkError<V::Error>>
+	where
+		V: EntryVisitor,
+	{
+		let tracks_ancestor = self.options.follow_links == FollowLinks::Always;
+		if tracks_ancestor {
+			self.symlink_ancestors.push(self.absolute_path.clone());
+		}
+		let mut scratch = self.take_scratch();
+		let ignore_entries = match collect_directory_entries(
+			self.fs,
+			&self.absolute_path,
+			self.options.listing_detail(depth),
+			&mut scratch,
+			&self.matcher,
+			derive_ignore_from_entries,
+		) {
+			Ok(ignore_entries) => ignore_entries,
+			Err(err) => {
+				self.recycle_scratch(scratch);
+				if tracks_ancestor {
+					self.symlink_ancestors.pop();
+				}
+				let dir = self.absolute_path.clone();
+				return Ok(if handle_read_dir_error(&dir, err, self.options, visitor)? {
+					DirOpen::Stopped
+				} else {
+					DirOpen::Skipped
+				});
+			},
+		};
+		if self.options.order == WalkOrder::Path {
+			scratch.sort_by_name();
+		}
+		let ignore = self.matcher.state_from_entries(
+			self.fs,
+			parent_ignore,
+			&self.absolute_path,
+			ignore_entries,
+			derive_ignore_from_entries,
+		);
+		Ok(DirOpen::Listed(DirFrame {
+			scratch,
+			ignore,
+			depth,
+			next: 0,
+			tracks_ancestor,
+			entry: None,
+		}))
+	}
+
+	/// Close a fully walked directory: release its listing and symlink
+	/// ancestor, then finish the entry that opened it (`parent` holds that
+	/// entry's listing). Returns whether the visitor stopped the walk.
+	fn leave_dir<V>(
+		&mut self,
+		frame: DirFrame,
+		parent: Option<&DirFrame>,
+		visitor: &mut V,
+	) -> std::result::Result<bool, WalkError<V::Error>>
+	where
+		V: EntryVisitor,
+	{
+		self.recycle_scratch(frame.scratch);
+		if frame.tracks_ancestor {
+			self.symlink_ancestors.pop();
+		}
+		let Some(entry) = frame.entry else {
+			return Ok(false);
+		};
+		if let Some(post_visit) = entry.post_visit {
+			let parent = parent.expect("an entered directory sits above its parent listing");
+			let name = parent.scratch.name(&parent.scratch.entries[entry.index]);
+			if self.post_visit(name, post_visit, visitor)? {
+				return Ok(true);
+			}
+		}
+		self.pop_entry_path(entry.path);
+		Ok(false)
+	}
+
+	/// Emit a contents-first entry after its contents. Returns whether the
+	/// visitor stopped the walk.
+	fn post_visit<V>(
+		&self,
+		name: &OsStr,
+		post_visit: PostVisit,
+		visitor: &mut V,
+	) -> std::result::Result<bool, WalkError<V::Error>>
+	where
+		V: EntryVisitor,
+	{
+		let control = visitor
+			.visit_pre_decided(Entry {
+				path: self.absolute_path.as_path(),
+				relative: &self.relative_path,
+				name,
+				file_type: post_visit.file_type,
+				mtime: post_visit.mtime,
+				size: post_visit.size,
+				depth: post_visit.depth,
+			})
+			.map_err(WalkError::Interrupted)?;
+		Ok(control == WalkControl::Quit)
+	}
+
+	/// Filter and pre-visit the entry at `absolute_path`, and decide whether
+	/// its directory is walked.
+	fn enter_entry<V>(
 		&mut self,
 		name: &OsStr,
 		entry_file_type: FileType,
@@ -3033,10 +3174,9 @@ impl<H> WalkContext<'_, H> {
 		next_depth: usize,
 		dir_ignore: &Arc<IgnoreState>,
 		visitor: &mut V,
-	) -> std::result::Result<bool, WalkError<V::Error>>
+	) -> std::result::Result<EntryStep, WalkError<V::Error>>
 	where
 		V: EntryVisitor,
-		H: FnMut() -> std::result::Result<(), V::Error>,
 	{
 		let mut file_type = entry_file_type;
 		let mut mtime = entry_mtime;
@@ -3050,7 +3190,8 @@ impl<H> WalkContext<'_, H> {
 			match self.fs.metadata(&self.absolute_path) {
 				Ok(metadata) => Some(metadata),
 				Err(err) => {
-					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor);
+					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor)
+						.map(EntryStep::stop_or_done);
 				},
 			}
 		} else {
@@ -3059,7 +3200,7 @@ impl<H> WalkContext<'_, H> {
 
 		if let Some(target_metadata) = followed_metadata.as_ref() {
 			let Some(target_file_type) = file_type_from_metadata(target_metadata) else {
-				return Ok(false);
+				return Ok(EntryStep::Done(None));
 			};
 			file_type = target_file_type;
 			if target_file_type == FileType::Dir {
@@ -3085,7 +3226,7 @@ impl<H> WalkContext<'_, H> {
 				.matcher
 				.is_ignored(dir_ignore, &self.absolute_path, is_dir)
 		{
-			return Ok(false);
+			return Ok(EntryStep::Done(None));
 		}
 
 		if !is_effective_path_on_root_file_system(
@@ -3096,7 +3237,7 @@ impl<H> WalkContext<'_, H> {
 			self.root_device,
 			followed_metadata.as_ref(),
 		) {
-			return Ok(false);
+			return Ok(EntryStep::Done(None));
 		}
 
 		if followed_symlink_dir && descend {
@@ -3112,13 +3253,13 @@ impl<H> WalkContext<'_, H> {
 								})
 								.map_err(WalkError::Interrupted)?
 							{
-								WalkControl::Quit => return Ok(true),
+								WalkControl::Quit => return Ok(EntryStep::Stop),
 								WalkControl::SkipDescend | WalkControl::Continue => {
-									return Ok(false);
+									return Ok(EntryStep::Done(None));
 								},
 							}
 						} else if self.options.directory_errors == DirectoryErrorMode::SkipSkippable {
-							return Ok(false);
+							return Ok(EntryStep::Done(None));
 						}
 						return Err(WalkError::InvalidData {
 							path:    self.absolute_path.clone(),
@@ -3127,7 +3268,8 @@ impl<H> WalkContext<'_, H> {
 					}
 				},
 				Err(err) => {
-					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor);
+					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor)
+						.map(EntryStep::stop_or_done);
 				},
 			}
 		}
@@ -3147,7 +3289,7 @@ impl<H> WalkContext<'_, H> {
 				.map_err(WalkError::Interrupted)?
 		};
 		if decision.stop {
-			return Ok(true);
+			return Ok(EntryStep::Stop);
 		}
 
 		if !self.options.contents_first && decision.emit && next_depth >= self.options.min_depth {
@@ -3163,41 +3305,111 @@ impl<H> WalkContext<'_, H> {
 				})
 				.map_err(WalkError::Interrupted)?
 			{
-				WalkControl::Quit => return Ok(true),
-				WalkControl::SkipDescend => return Ok(false),
+				WalkControl::Quit => return Ok(EntryStep::Stop),
+				WalkControl::SkipDescend => return Ok(EntryStep::Done(None)),
 				WalkControl::Continue => {},
 			}
 		}
 
-		let child_stopped = if descend && next_depth < self.options.max_depth && decision.descend {
-			self.walk_dir(next_depth, dir_ignore, true, visitor)?
+		let post_visit =
+			(self.options.contents_first && decision.emit && next_depth >= self.options.min_depth)
+				.then_some(PostVisit { file_type, mtime, size, depth: next_depth });
+		Ok(if descend && next_depth < self.options.max_depth && decision.descend {
+			EntryStep::Descend(post_visit)
 		} else {
-			false
-		};
+			EntryStep::Done(post_visit)
+		})
+	}
+}
 
-		if child_stopped {
-			return Ok(true);
+/// The directories [`WalkContext::walk_tree`] is listing, the deepest last.
+///
+/// Each directory's ignore state can point at its parent directory's. When a
+/// walk stops or fails part way down, the frames are released deepest-first:
+/// releasing the root's frame first would leave the deepest one holding the
+/// whole chain, and freeing that recurses once per level.
+struct DirStack(Vec<DirFrame>);
+
+impl Drop for DirStack {
+	fn drop(&mut self) {
+		while self.0.pop().is_some() {}
+	}
+}
+
+impl std::ops::Deref for DirStack {
+	type Target = Vec<DirFrame>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl std::ops::DerefMut for DirStack {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.0
+	}
+}
+
+/// A listed directory on [`WalkContext::walk_tree`]'s stack.
+struct DirFrame {
+	scratch:         DirScratch,
+	/// Ignore state for this directory's entries.
+	ignore:          Arc<IgnoreState>,
+	/// Depth of this directory; its entries sit one level deeper.
+	depth:           usize,
+	/// Next entry of `scratch` to visit.
+	next:            usize,
+	/// Opening this directory pushed a symlink ancestor.
+	tracks_ancestor: bool,
+	/// The parent-listing entry this directory belongs to; `None` for the root.
+	entry:           Option<OpenedEntry>,
+}
+
+/// The entry whose directory a [`DirFrame`] lists, finished when it closes.
+struct OpenedEntry {
+	/// Position of the entry in the parent frame's listing.
+	index:      usize,
+	/// Path state to restore once the directory is done.
+	path:       (SavedParent, usize),
+	/// Contents-first emission owed after the directory's contents.
+	post_visit: Option<PostVisit>,
+}
+
+/// A contents-first emission deferred until after the entry's contents.
+#[derive(Clone, Copy)]
+struct PostVisit {
+	file_type: FileType,
+	mtime:     Option<f64>,
+	size:      Option<f64>,
+	depth:     usize,
+}
+
+/// Outcome of listing one directory.
+enum DirOpen {
+	Listed(DirFrame),
+	/// The listing failed and the walk goes on without it.
+	Skipped,
+	/// The visitor stopped the walk on the listing error.
+	Stopped,
+}
+
+/// What [`WalkContext::walk_tree`] does after entering one entry.
+enum EntryStep {
+	/// The visitor stopped the walk.
+	Stop,
+	/// The entry is finished apart from an optional contents-first emission.
+	Done(Option<PostVisit>),
+	/// Walk the entry's directory, then emit it if owed.
+	Descend(Option<PostVisit>),
+}
+
+impl EntryStep {
+	const fn stop_or_done(stopped: bool) -> Self {
+		if stopped {
+			Self::Stop
+		} else {
+			Self::Done(None)
 		}
-
-		if self.options.contents_first && decision.emit && next_depth >= self.options.min_depth {
-			match visitor
-				.visit_pre_decided(Entry {
-					path: self.absolute_path.as_path(),
-					relative: &self.relative_path,
-					name,
-					file_type,
-					mtime,
-					size,
-					depth: next_depth,
-				})
-				.map_err(WalkError::Interrupted)?
-			{
-				WalkControl::Quit => return Ok(true),
-				WalkControl::SkipDescend | WalkControl::Continue => {},
-			}
-		}
-
-		Ok(false)
 	}
 }
 
@@ -5177,14 +5389,160 @@ mod tests {
 	}
 
 	#[test]
+	fn ranked_collection_counts_filtered_descendants_without_pruning() {
+		let tree = temp_tree("ranked-emission-filter");
+		fs::create_dir_all(tree.path().join("node_modules/pkg")).expect("create excluded subtree");
+		fs::create_dir(tree.path().join("nested")).expect("create matching subtree");
+		for (index, relative) in [
+			"a.txt",
+			"large.txt",
+			"nested/keep.txt",
+			"node_modules/pkg/hidden.txt",
+			"other.bin",
+			"z.txt",
+		]
+		.into_iter()
+		.enumerate()
+		{
+			let file = fs::File::create(tree.path().join(relative)).expect("create file");
+			file
+				.set_len(if relative == "large.txt" { 2 } else { 1 })
+				.expect("set size");
+			file
+				.set_modified(UNIX_EPOCH + Duration::from_secs(100 + index as u64))
+				.expect("set modification time");
+		}
+		let request = WalkRequest::from_options(tree.path(), WalkOptions {
+			skip_node_modules: false,
+			detail: WalkDetail::Full,
+			..test_options()
+		})
+		.filter(
+			WalkFilter::files_only()
+				.max_file_size(1)
+				.glob(CompiledWalkGlob::new(["**/*.txt"]).expect("compile glob"))
+				.node_modules_unless_mentioned(false),
+		);
+		for (rank, expected) in [
+			(WalkRank::PathAsc, ["a.txt", "nested/keep.txt", "z.txt"]),
+			(WalkRank::MtimeDescPathAsc, ["z.txt", "nested/keep.txt", "a.txt"]),
+		] {
+			for limit in [0, 1, 3, 4] {
+				let outcome = request
+					.collect_ranked(rank, limit)
+					.expect("collect ranked files");
+				assert_eq!(
+					outcome
+						.entries
+						.iter()
+						.map(|entry| entry.path.as_str())
+						.collect::<Vec<_>>(),
+					expected[..limit.min(expected.len())]
+				);
+				assert_eq!(outcome.stats, WalkStats {
+					cache_age_ms:     0,
+					scanned_entries:  9,
+					filtered_entries: 6,
+					limited_entries:  3usize.saturating_sub(limit),
+				});
+			}
+		}
+	}
+
+	#[test]
+	fn ranked_filter_preserves_kinds_unknown_sizes_and_node_modules_opt_in() {
+		let inputs = [
+			("boundary.txt", FileType::File, Some(2.0)),
+			("large.txt", FileType::File, Some(3.0)),
+			("unknown.txt", FileType::File, None),
+			("dir.txt", FileType::Dir, Some(99.0)),
+			("link.txt", FileType::Symlink, Some(99.0)),
+			("other.bin", FileType::File, Some(1.0)),
+			("node_modules", FileType::Dir, None),
+			("node_modules/hidden.txt", FileType::File, Some(1.0)),
+			("node_modules_like.txt", FileType::File, Some(1.0)),
+		];
+		for (filter, mentioned, expected) in [
+			(
+				WalkFilter::all(),
+				false,
+				&["boundary.txt", "dir.txt", "link.txt", "node_modules_like.txt", "unknown.txt"][..],
+			),
+			(
+				WalkFilter::files_only(),
+				false,
+				&["boundary.txt", "node_modules_like.txt", "unknown.txt"][..],
+			),
+			(WalkFilter::dirs_only(), false, &["dir.txt"][..]),
+			(
+				WalkFilter::all(),
+				true,
+				&[
+					"boundary.txt",
+					"dir.txt",
+					"link.txt",
+					"node_modules/hidden.txt",
+					"node_modules_like.txt",
+					"unknown.txt",
+				][..],
+			),
+		] {
+			let filter = filter
+				.max_file_size(2)
+				.glob(CompiledWalkGlob::new(["**/*.txt"]).expect("compile glob"))
+				.node_modules_unless_mentioned(mentioned);
+			for limit in [2, usize::MAX] {
+				let mut collector = RankedCollectVisitor::new(&filter, WalkRank::PathAsc, limit);
+				for (relative, file_type, size) in inputs {
+					collector
+						.visit(Entry {
+							path: Path::new(relative),
+							relative,
+							name: OsStr::new(relative),
+							file_type,
+							mtime: None,
+							size,
+							depth: relative.split('/').count(),
+						})
+						.expect("collect synthetic entry");
+				}
+				let outcome = collector.into_outcome();
+				assert_eq!(
+					outcome
+						.entries
+						.iter()
+						.map(|entry| entry.path.as_str())
+						.collect::<Vec<_>>(),
+					expected[..limit.min(expected.len())]
+				);
+				assert_eq!(outcome.stats.scanned_entries, inputs.len());
+				assert_eq!(outcome.stats.filtered_entries, inputs.len() - expected.len());
+				assert_eq!(outcome.stats.limited_entries, expected.len().saturating_sub(limit));
+			}
+		}
+	}
+
+	#[test]
 	fn ranked_collection_keeps_heartbeat_cancellation_after_limit_is_filled() {
 		let tree = temp_tree("ranked-cancel");
+		fs::write(tree.path().join("a.txt"), "x").expect("create first retained file");
+		fs::create_dir(tree.path().join("node_modules")).expect("create later subtree");
 		for index in 0..300 {
-			fs::write(tree.path().join(format!("{index}.txt")), "x").expect("create file");
+			fs::write(tree.path().join(format!("node_modules/{index}.txt")), "x")
+				.expect("create file");
 		}
-		for limit in [0, 1] {
-			let beats = std::sync::atomic::AtomicUsize::new(0);
-			let result = WalkRequest::from_options(tree.path(), test_options())
+		for filter in [
+			WalkFilter::all(),
+			WalkFilter::all().node_modules_unless_mentioned(false),
+			WalkFilter::all().glob(CompiledWalkGlob::new(["**/*.absent"]).expect("compile glob")),
+		] {
+			for limit in [0, 1] {
+				let beats = std::sync::atomic::AtomicUsize::new(0);
+				let result = WalkRequest::from_options(tree.path(), WalkOptions {
+					skip_node_modules: false,
+					..test_options()
+				})
+				.filter(filter.clone())
 				.collect_ranked_with_heartbeat(WalkRank::PathAsc, limit, || {
 					if beats.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
 						Ok(())
@@ -5192,7 +5550,10 @@ mod tests {
 						Err("cancelled")
 					}
 				});
-			assert!(matches!(result, Err(WalkError::Interrupted(message)) if message == "cancelled"));
+				assert!(
+					matches!(result, Err(WalkError::Interrupted(message)) if message == "cancelled")
+				);
+			}
 		}
 	}
 
@@ -5219,33 +5580,54 @@ mod tests {
 			"negative-nan",
 			"missing",
 		];
-		for limit in [0, 1, 4, 8, 100] {
-			let mut collector = RankedCollectVisitor::new(&filter, WalkRank::MtimeDescPathAsc, limit);
-			for (relative, mtime) in inputs {
-				collector
-					.visit(Entry {
-						path: Path::new(relative),
-						relative,
-						name: OsStr::new(relative),
-						file_type: FileType::File,
-						mtime,
-						size: None,
-						depth: 1,
-					})
-					.expect("collect synthetic metadata");
-				assert!(collector.entries.len() <= limit);
+		let path_expected = [
+			"infinity",
+			"missing",
+			"negative-nan",
+			"negative-zero",
+			"positive-nan",
+			"positive-zero",
+			"tie-a",
+			"tie-z",
+		];
+		for (rank, expected) in
+			[(WalkRank::PathAsc, path_expected), (WalkRank::MtimeDescPathAsc, expected)]
+		{
+			for limit in 0..=inputs.len() + 1 {
+				let mut collector = RankedCollectVisitor::new(&filter, rank, limit);
+				for (relative, mtime) in inputs {
+					// Each visit borrows a temporary path; retained results must own
+					// it.
+					let relative = relative.to_string();
+					collector
+						.visit(Entry {
+							path: Path::new(&relative),
+							relative: &relative,
+							name: OsStr::new(&relative),
+							file_type: FileType::File,
+							mtime,
+							size: None,
+							depth: 1,
+						})
+						.expect("collect synthetic metadata");
+				}
+				let outcome = collector.into_outcome();
+				assert_eq!(
+					outcome
+						.entries
+						.iter()
+						.map(|entry| entry.path.as_str())
+						.collect::<Vec<_>>(),
+					expected[..limit.min(expected.len())]
+				);
+				for entry in &outcome.entries {
+					let (_, mtime) = inputs.iter().find(|(path, _)| *path == entry.path).unwrap();
+					assert_eq!(entry.mtime.map(f64::to_bits), mtime.map(f64::to_bits));
+				}
+				assert_eq!(outcome.stats.scanned_entries, inputs.len());
+				assert_eq!(outcome.stats.filtered_entries, 0);
+				assert_eq!(outcome.stats.limited_entries, inputs.len().saturating_sub(limit));
 			}
-			let outcome = collector.into_outcome();
-			assert_eq!(
-				outcome
-					.entries
-					.iter()
-					.map(|entry| entry.path.as_str())
-					.collect::<Vec<_>>(),
-				expected[..limit.min(expected.len())]
-			);
-			assert_eq!(outcome.stats.scanned_entries, inputs.len());
-			assert_eq!(outcome.stats.limited_entries, inputs.len().saturating_sub(limit));
 		}
 	}
 
@@ -5764,6 +6146,59 @@ mod tests {
 		assert!(!visitor.seen.iter().any(|path| path == "skip/file.txt"));
 	}
 
+	/// Nesting depth must not consume the call stack: native walks run on
+	/// 2 MiB worker threads, and a Windows path nests far deeper than that
+	/// fits at one stack frame per directory (#16857).
+	#[test]
+	fn walks_trees_deeper_than_the_thread_stack() {
+		const DEPTH: usize = 400;
+		let tree = temp_tree("deep-nesting");
+		let mut deepest = tree.path().to_path_buf();
+		for _ in 0..DEPTH {
+			deepest.push("d");
+		}
+		fs::create_dir_all(&deepest).expect("deep tree should be created");
+		fs::write(deepest.join("leaf.txt"), "ok").expect("leaf should be written");
+		let leaf = format!("{}leaf.txt", "d/".repeat(DEPTH));
+
+		for contents_first in [false, true] {
+			// 400 nested dirs exceed Windows' MAX_PATH; walk through the verbatim
+			// prefix so the listing reaches the leaf instead of stopping at ~260
+			// chars.
+			let root = if cfg!(windows) {
+				std::path::PathBuf::from(format!(r"\\?\{}", tree.path().display()))
+			} else {
+				tree.path().to_path_buf()
+			};
+			let seen = std::thread::Builder::new()
+				.stack_size(256 * 1024)
+				.spawn(move || {
+					let mut visitor = PruneVisitor { seen: Vec::new() };
+					let status = walk_entries(
+						&root,
+						WalkOptions { contents_first, ..test_options() },
+						&mut visitor,
+						|| Ok::<(), Infallible>(()),
+					)
+					.expect("walk should not fail");
+					assert_eq!(status, WalkStatus::Complete);
+					visitor.seen
+				})
+				.expect("walker thread should spawn")
+				.join()
+				.expect("walk should not overflow the thread stack");
+
+			assert_eq!(seen.len(), DEPTH + 1);
+			let (first, last) = if contents_first {
+				(leaf.as_str(), "d")
+			} else {
+				("d", leaf.as_str())
+			};
+			assert_eq!(seen.first().map(String::as_str), Some(first));
+			assert_eq!(seen.last().map(String::as_str), Some(last));
+		}
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn walk_entries_always_follows_descendant_symlink_directories() {
@@ -5964,5 +6399,60 @@ mod tests {
 			("link".to_string(), FileType::Symlink, None, true),
 			("sub".to_string(), FileType::Dir, None, true),
 		]);
+	}
+
+	/// A walk that honors ignore files and stops at the leaf of a chain as
+	/// deep as path syscalls reach, by quitting or by failing, must return
+	/// that result rather than overflow the stack of the thread it runs on
+	/// while it releases each level's ignore state.
+	#[cfg(unix)]
+	#[test]
+	fn stopping_at_the_leaf_of_a_deep_ignore_chain_returns() {
+		struct StopAtLeaf {
+			fail: bool,
+		}
+
+		impl EntryVisitor for StopAtLeaf {
+			type Error = &'static str;
+
+			fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
+				if entry.name != OsStr::new("leaf") {
+					Ok(WalkControl::Continue)
+				} else if self.fail {
+					Err("failed at the leaf")
+				} else {
+					Ok(WalkControl::Quit)
+				}
+			}
+		}
+
+		let tree = temp_tree("deep-ignore-chain");
+		let root = fs::canonicalize(tree.path()).expect("temp root should canonicalize");
+		// Stay under PATH_MAX: every level adds "/d".
+		let path_max = usize::try_from(libc::PATH_MAX).expect("PATH_MAX is positive");
+		let depth = (path_max - 96 - root.join("leaf").as_os_str().len()) / 2;
+		let mut dir = root.clone();
+		for _ in 0..depth {
+			dir.push("d");
+			fs::create_dir(&dir).expect("chain level should be created");
+			fs::write(dir.join(".ignore"), "*.log\n").expect("ignore file should be written");
+		}
+		fs::write(dir.join("leaf"), "x").expect("leaf should be written");
+
+		let walk = |fail: bool| {
+			let root = root.clone();
+			std::thread::Builder::new()
+				.stack_size(256 * 1024)
+				.spawn(move || {
+					let options = WalkOptions { use_gitignore: true, ..test_options() };
+					walk_entries(&root, options, &mut StopAtLeaf { fail }, || Ok(()))
+				})
+				.expect("walk thread should spawn")
+				.join()
+				.expect("walk thread should not crash")
+		};
+
+		assert!(matches!(walk(false), Ok(WalkStatus::Stopped)));
+		assert!(matches!(walk(true), Err(WalkError::Interrupted("failed at the leaf"))));
 	}
 }

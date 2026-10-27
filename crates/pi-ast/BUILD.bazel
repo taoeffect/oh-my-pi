@@ -11,6 +11,9 @@ rust_library(
     name = "pi-ast",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
+    # Cargo gates WebAssembly grammars behind the default `wasm` feature; omp's
+    # Bazel build always ships them.
+    crate_features = ["wasm"],
     crate_name = "pi_ast",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -23,6 +26,7 @@ rust_library(
 rust_test(
     name = "pi-ast_test",
     compile_data = ["src/language/testdata/ini.wasm"],
+    crate_features = ["wasm"],
     crate = ":pi-ast",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),

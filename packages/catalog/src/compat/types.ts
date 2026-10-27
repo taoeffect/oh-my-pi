@@ -351,6 +351,8 @@ export interface CompiledBehavior {
 	pricingPeers: CompiledPricingPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	/** Hosts whose prefix caches benefit from a stable append-only conversation. */
+	appendOnlyContextProviders: string[];
 	referenceIsolatedProviders: string[];
 	/** Built-in model selector chains per agent role, keyed by role in declaration order. */
 	roleDefaults: Record<string, string[]>;

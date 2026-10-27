@@ -98,6 +98,21 @@ describe("compat rules conformance", () => {
 		expect(offenders).toEqual([]);
 	});
 
+	test('every bundle="always" seed row is bundled in models.json', () => {
+		// bundledSeedRows() writes every bundle="always" seed row on each
+		// regeneration, so a missing row means models.json was regenerated from
+		// a stale snapshot (#16610 lost web/deepseek that way in 18.12.2).
+		const offenders: string[] = [];
+		for (const [provider, entry] of Object.entries(rules.providers)) {
+			if (entry.seed?.bundle !== "always") continue;
+			const bundled = Object.entries(models).find(([id]) => id === provider)?.[1] ?? {};
+			for (const seed of entry.seed.models) {
+				if (!Object.hasOwn(bundled, seed.id)) offenders.push(`${provider}/${seed.id}`);
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
+
 	test("every cascade class/family reference exists in the taxonomy", () => {
 		const classes = new Map(rules.taxonomy.classes.map(cls => [cls.id, new Set(cls.families.map(f => f.id))]));
 		const offenders: string[] = [];

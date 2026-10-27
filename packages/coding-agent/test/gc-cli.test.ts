@@ -5,8 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
+import {
+	GC_AUTO_COMPRESS_INTERVAL_MS,
+	GC_AUTO_COMPRESS_LOG,
+	scheduleGcAutoCompress,
+} from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
-import { compressMethod } from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
+import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -2535,9 +2540,21 @@ describe("runGcCommand stale state", () => {
 });
 
 // Test roots live under the temp dir, so its filesystem decides which compression tests run.
-const method = await compressMethod(os.tmpdir());
+const method = await gcCompress.compressMethod(os.tmpdir());
 const supported = method !== undefined;
 const onApfs = method === "apfs";
+// `compressionWorks` returns false before it runs any tool when its probe file is no compression candidate here,
+// e.g. on a huge-page tmpfs whose per-file block size exceeds the probe. Built like the probe in gc-compress.ts.
+const probeReachesTool = await (async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-gc-probe-"));
+	try {
+		const probe = path.join(dir, "probe.txt");
+		await Bun.write(probe, "omp gc compression probe\n".repeat(10_000));
+		return (await gcCompress.compressCandidate(probe)) !== undefined;
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+})();
 
 describe("runGcCommand session compression", () => {
 	const filler =
@@ -2750,6 +2767,19 @@ describe("runGcCommand session compression", () => {
 		expect(result.compress).toMatchObject({ skippedLive: 0, compressed: 3 });
 	});
 
+	test.skipIf(!supported)("a dry run reads past a large JSON artifact with no session header", async () => {
+		const { artifact } = await writeIdleSession(Bun.randomUUIDv7());
+		// Pretty-printed JSON opens like a record but completes none within the header
+		// read cap, and the file continues well past it.
+		const output = path.join(path.dirname(artifact), "2.mcp_search.log");
+		await Bun.write(output, `{\n  "results": [\n${'    "row",\n'.repeat(160_000)}    "end"\n  ]\n}\n`);
+		await agePathSubMs(output, 30);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true } });
+
+		expect(result.compress).toMatchObject({ skippedLive: 0, sessions: 1, wouldCompress: 3, errors: [] });
+	});
+
 	test.skipIf(!supported)("--compress-after-days overrides gc.compressAfterDays", async () => {
 		await writeConfig(root, ["gc:", "  compressAfterDays: 60", ""].join("\n"));
 		await writeIdleSession(Bun.randomUUIDv7(), "complete", 30);
@@ -2759,5 +2789,105 @@ describe("runGcCommand session compression", () => {
 
 		expect(configured.compress?.wouldCompress).toBe(0);
 		expect(overridden.compress?.wouldCompress).toBe(2);
+	});
+
+	test.skipIf(!supported)(
+		"the background run compresses idle sessions, then waits a day before running again",
+		async () => {
+			const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+			const logPath = path.join(root, GC_AUTO_COMPRESS_LOG);
+
+			const child = await scheduleGcAutoCompress(root);
+			expect(await child?.exited).toBe(0);
+			for (const target of [file, artifact]) {
+				const after = await snapshot(target);
+				expect(after.allocated).toBeLessThan(after.size);
+			}
+			expect(await Bun.file(logPath).text()).toContain("compress: 2/2 files in 1 sessions");
+
+			expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+
+			const lastRun = (Date.now() - GC_AUTO_COMPRESS_INTERVAL_MS - 60_000) / 1000;
+			await fs.utimes(logPath, lastRun, lastRun);
+			const next = await scheduleGcAutoCompress(root);
+			expect(await next?.exited).toBe(0);
+			expect(await Bun.file(logPath).text()).toContain("compress: 0/0 files in 0 sessions");
+		},
+		60_000,
+	);
+
+	test.skipIf(!supported)(
+		"simultaneous launches start one background run and keep its summary",
+		async () => {
+			await writeIdleSession(Bun.randomUUIDv7());
+			const logPath = path.join(root, GC_AUTO_COMPRESS_LOG);
+			const lastRun = (Date.now() - GC_AUTO_COMPRESS_INTERVAL_MS - 60_000) / 1000;
+			await Bun.write(logPath, "previous run\n");
+			await fs.utimes(logPath, lastRun, lastRun);
+
+			const launched = (await Promise.all([1, 2, 3].map(() => scheduleGcAutoCompress(root)))).filter(
+				child => child !== undefined,
+			);
+
+			expect(launched).toHaveLength(1);
+			expect(await launched[0].exited).toBe(0);
+			const log = await Bun.file(logPath).text();
+			expect(log).toContain("compress: 2/2 files in 1 sessions");
+			expect(log).not.toContain("GC already running");
+		},
+		60_000,
+	);
+
+	test.skipIf(!supported)("--apply on a volume whose compression shrinks nothing leaves sessions alone", async () => {
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+		const probe = spyOn(gcCompress, "compressionWorks").mockResolvedValue(false);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		} finally {
+			probe.mockRestore();
+		}
+
+		expect(result.compress).toMatchObject({ supported: true, scanned: 0, wouldCompress: 0, compressed: 0 });
+		expect(result.compress?.probeFailure).toContain("stored a compressible probe file uncompressed");
+		expect(await snapshot(file)).toEqual(before);
+	});
+
+	test("omp gc --compress --apply fails when the compression probe cannot run", async () => {
+		// A supported volume, but no sessions directory to hold the probe's scratch dir.
+		const volume = spyOn(gcCompress, "compressMethod").mockResolvedValue("ntfs");
+		try {
+			await runCli(["gc", "--agent-dir", root, "--compress", "--apply"]);
+		} finally {
+			volume.mockRestore();
+		}
+
+		const stderr = stderrWrites.join("");
+		expect(process.exitCode).toBe(1);
+		expect(stderr).toContain("GC completed with 1 error:");
+		expect(stderr).toContain("compress: compression probe: ENOENT");
+		expect(writes.join("")).not.toContain("compress skipped");
+	});
+
+	test.skipIf(!probeReachesTool)(
+		"the compression probe throws when the compression tool fails instead of reporting no compression",
+		async () => {
+			// The other platform's tool is absent here, so its batch reports a command failure.
+			const absentTool = process.platform === "win32" ? "apfs" : "ntfs";
+
+			await expect(gcCompress.compressionWorks(root, absentTool)).rejects.toThrow(
+				absentTool === "apfs" ? "ditto exited" : "compact exited",
+			);
+		},
+	);
+
+	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+
+		expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped: unsupported");
+		expect(await snapshot(file)).toEqual(before);
 	});
 });

@@ -518,6 +518,14 @@ export function isAnthropicMessagesModel(model: Model): model is Model<"anthropi
 	return model.api === "anthropic-messages";
 }
 
+/** Whether `turn` came from `model` itself: its own turns replay their native reasoning unchanged. */
+export function isSameModelTurn(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: Pick<Model, "provider" | "api" | "id">,
+): boolean {
+	return turn.provider === model.provider && turn.api === model.api && turn.model === model.id;
+}
+
 /**
  * Targets that have proven they read unsigned foreign thinking when replayed
  * natively. This is a semantic-carry allowlist only: OpenAI-compatible
@@ -883,10 +891,7 @@ export function transformMessages<TApi extends Api>(
 		// Assistant messages need transformation check
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
-			const isSameModel =
-				assistantMsg.provider === model.provider &&
-				assistantMsg.api === model.api &&
-				assistantMsg.model === model.id;
+			const isSameModel = isSameModelTurn(assistantMsg, model);
 			// The same model on another host (or another id of the same model):
 			// its full plaintext reasoning replays natively where the target has
 			// a native slot, exactly as the target replays its own turns. Errored

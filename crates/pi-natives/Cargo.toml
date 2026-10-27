@@ -60,7 +60,7 @@ parking_lot.workspace = true
 pdf-inspector.workspace = true
 phf.workspace = true
 flume.workspace = true
-pi-ast.workspace = true
+pi-ast = { workspace = true, features = ["wasm"] }
 pi-builtins = { workspace = true, features = ["util.grep"] }
 pi-diff.workspace = true
 pi-edit.workspace = true

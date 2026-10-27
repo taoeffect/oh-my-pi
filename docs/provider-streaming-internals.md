@@ -103,6 +103,34 @@ Tool-call argument streaming:
 - providers that send only `response.function_call_arguments.done` still populate final args
 - tool call IDs are normalized as `"<call_id>|<item_id>"`
 
+### OpenRouter native finish reasons
+
+Chat Completions and Responses treat explicit `native_finish_reason` values
+`MALFORMED_RESPONSE`, `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, and
+`network_error` as provider errors, regardless of a normalized successful finish.
+Usage and response IDs survive, and earlier tool-call fragments cannot promote
+the failed turn to `toolUse`. Unknown native reasons remain forward-compatible.
+
+OpenRouter defaults to Responses, whose translation can omit the native reason.
+For a terminal `stop` with no content blocks, native output items, or progress
+marker, the Responses adapter performs one best-effort `GET /generation?id=...`
+against the configured base URL per attempt. It reuses request authentication,
+the custom fetch implementation, and cancellation, with a two-second deadline.
+Matching generation metadata with a recognized failure changes the result. A
+metadata `404` on a zero-item turn with non-reasoning output usage triggers an
+explicitly **inferred** `MALFORMED_RESPONSE` recovery, not a confirmed native
+reason. Other HTTP failures, transport/JSON errors, reasoning-only usage, and
+unknown or mismatched metadata preserve existing empty-stop recovery.
+Visible output, signed reasoning, and provider-hosted tool progress do not incur
+this lookup. Terminal malformed Responses bypass adapter-level replay so the
+agent can add its corrective reminder before retrying. Transient network errors
+retain adapter-level retries; existing agent retry budgets still apply, and
+retries can issue fresh billable generations.
+
+Provider-reported output counts can include reasoning and failed structured
+generation. Without an explicit failure reason, usage alone establishes neither
+content filtering nor that deliverable output was generated and dropped.
+
 ## Google Generative AI (`google-generative-ai`)
 
 Source: `packages/ai/src/providers/google.ts` (thin request wrapper) and `google-shared.ts` (`streamGoogleGenAI`, shared chunk-to-block translation)

@@ -66,7 +66,17 @@ runs:
         if: steps.env.outputs.setup_bun == 'true'
         shell: bash
         run: |
+           # On omp-kata the shared store PVC is mounted under ~/.bun, so ~/.bun
+           # itself can be owned by root and unwritable. Fall back to a job-local
+           # dir, and persist it: the image sets BUN_INSTALL=/usr/local, which
+           # later steps would otherwise inherit (cache -> /usr/local/install/cache,
+           # unwritable). Pin the cache to the mounted store explicitly.
            export BUN_INSTALL="${HOME}/.bun"
+           if ! mkdir -p "${BUN_INSTALL}/bin" 2>/dev/null || [ ! -w "${BUN_INSTALL}/bin" ]; then
+             export BUN_INSTALL="${RUNNER_TEMP:-/tmp}/bun"
+             echo "BUN_INSTALL=${BUN_INSTALL}" >> "$GITHUB_ENV"
+             echo "BUN_INSTALL_CACHE_DIR=${BUN_INSTALL_CACHE_DIR:-${HOME}/.bun/install/cache}" >> "$GITHUB_ENV"
+           fi
            # Unquoted on purpose: an empty tag (floor pin) must pass no argument, which the
            # script reads as "latest".
            curl -fsSL https://bun.sh/install | bash -s -- ${{ steps.env.outputs.bun_install }}

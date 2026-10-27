@@ -51,6 +51,8 @@ export interface ExtensionAskDialogResultItem {
 	customInputImages?: ImageContent[];
 	note?: string;
 	noteImages?: ImageContent[];
+	/** Label of the option the note is on; unset when it is on the custom answer. */
+	noteOption?: string;
 	timedOut?: boolean;
 }
 
@@ -404,7 +406,7 @@ function describeAnswer(question: ExtensionAskDialogQuestion, state: QuestionSta
 			push(optionLabelSpans(question, index, labels[index] ?? option.label));
 	});
 	if (state.customInput !== undefined) push([span(`“${normalizedInlineInput(state.customInput)}”`)]);
-	const note = noteForSubmittedAnswer(question, state)?.trim();
+	const note = noteForSubmittedAnswer(question, state)?.text.trim();
 	if (note) spans.push(span("  ✎ ", "dim"), span(normalizedInlineInput(note), "em"));
 	return spans;
 }
@@ -448,13 +450,17 @@ function clearNoteUnlessRow(state: QuestionState, rowKey: string): void {
 	if (state.noteRowKey !== undefined && state.noteRowKey !== rowKey) clearNote(state);
 }
 
-function noteForSubmittedAnswer(question: ExtensionAskDialogQuestion, state: QuestionState): string | undefined {
+/** The note that goes out with the answer (its row is part of it), and the option it is on (unset for Other). */
+function noteForSubmittedAnswer(
+	question: ExtensionAskDialogQuestion,
+	state: QuestionState,
+): { text: string; option?: string } | undefined {
 	if (state.note === undefined || state.noteRowKey === undefined) return undefined;
-	if (state.noteRowKey === "other") return state.customInput !== undefined ? state.note : undefined;
+	if (state.noteRowKey === "other") return state.customInput !== undefined ? { text: state.note } : undefined;
 	const match = /^option:(\d+)$/.exec(state.noteRowKey);
 	const optionIndex = match?.[1] === undefined ? Number.NaN : Number.parseInt(match[1], 10);
 	const option = Number.isInteger(optionIndex) ? question.options[optionIndex] : undefined;
-	return option && state.selectedOptions.has(option.label) ? state.note : undefined;
+	return option && state.selectedOptions.has(option.label) ? { text: state.note, option: option.label } : undefined;
 }
 
 function renderRowLabel(
@@ -585,6 +591,12 @@ export class AskDialogComponent implements Component {
 	#countdownDeadline = 0;
 	/** Once-a-second re-describe while the native countdown ring is shown. */
 	#ringTick: NodeJS.Timeout | undefined;
+	/**
+	 * The answer whose pick just moved the dialog on to the next question. Note annotates it, not the
+	 * next question's highlighted row, until that question is answered or any other input arrives:
+	 * a Tern click commits a single-choice row, so picking then pressing Note is the mouse flow.
+	 */
+	#justAnswered: { questionIndex: number; rowKey: string } | undefined;
 	readonly #panel: OverlayPanel;
 	readonly #headerRegion: PanelRows;
 	readonly #bodyRegion: PanelRows;
@@ -682,6 +694,7 @@ export class AskDialogComponent implements Component {
 		// closed/prompt guards, matching HookSelector/HookInput semantics.
 		this.#countdown?.reset();
 		this.#native = undefined;
+		if (keyData !== "n" && keyData !== "N") this.#justAnswered = undefined;
 		if (matchesSelectCancel(keyData)) {
 			this.#finishCancel();
 			return;
@@ -1006,7 +1019,10 @@ export class AskDialogComponent implements Component {
 			tone: "accent",
 			title: question?.multi ? `${enterLabel}  enter · Toggle  space` : `${enterLabel}  enter`,
 		});
-		const note = actionButton("Note", "note", { keys: "n", title: "Add a note to the highlighted answer  n" });
+		const note = actionButton("Note", "note", {
+			keys: "n",
+			title: "Add a note to the highlighted answer, or to the one just picked  n",
+		});
 		return actionBar([...lead, null, note, skip, submit]);
 	}
 
@@ -1014,11 +1030,12 @@ export class AskDialogComponent implements Component {
 	 * Pointer actions: a tab click switches to it; a click on an answer row is
 	 * Enter on it (Space for a multi-select option, so it toggles; its
 	 * double-click `activate` is Enter); the action bar's Submit, Note and Skip
-	 * run exactly what Enter, `n` and Esc run on the highlighted row; Hide/Show
+	 * run what Enter (see {@link #pressEnter} for Other), `n` and Esc run on the highlighted row; Hide/Show
 	 * collapse and restore the dialog.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#closed || this.#promptActive) return;
+		if (event.type !== "action" || event.act !== "note") this.#justAnswered = undefined;
 		if (event.type === "action") {
 			if (event.act === "cancel") {
 				this.#finishCancel();
@@ -1062,7 +1079,13 @@ export class AskDialogComponent implements Component {
 		this.#requestRender();
 	}
 
-	/** Enter: submit on the Review tab, else commit the highlighted row. */
+	/**
+	 * The action bar's Submit/Next: submit on the Review tab, else commit the highlighted row —
+	 * except Other, whose row (click or Enter) already opens the editor. Reopening it here trapped a
+	 * cancelled Other: Next kept bringing the editor back instead of moving on. With a Review tab to
+	 * land on, Next keeps any custom answer and moves on; a lone single-select question has nowhere
+	 * to go but submitting nothing, so it still asks.
+	 */
 	#pressEnter(): void {
 		this.#countdown?.reset();
 		if (this.#isSubmitTab()) {
@@ -1072,18 +1095,38 @@ export class AskDialogComponent implements Component {
 		const active = this.#activeQuestionState();
 		const rowItem = active ? this.#questionRows(active.question)[active.state.cursorIndex] : undefined;
 		if (!active || !rowItem) return;
+		if (rowItem.kind === "other" && this.#hasSubmitTab()) {
+			this.#advanceAfterQuestion(active.state.customInput === undefined ? undefined : rowItem.key);
+			return;
+		}
 		this.#commitRow(active.question, active.state, rowItem, true);
 		this.#requestRender();
 	}
 
-	/** `n`: a note on the highlighted row (questions only). */
+	/** `n`: a note on the {@link #noteTarget} row (questions only). */
 	#pressNote(): void {
 		if (this.#isSubmitTab()) return;
 		this.#countdown?.reset();
+		const target = this.#noteTarget();
+		if (target) void this.#promptForNote(target.question, target.state, target.rowItem);
+	}
+
+	/**
+	 * The row a note goes to: the answer just picked while the question it moved on to is still
+	 * unanswered, else the highlighted row.
+	 */
+	#noteTarget(): { question: ExtensionAskDialogQuestion; state: QuestionState; rowItem: QuestionRow } | undefined {
 		const active = this.#activeQuestionState();
-		const rowItem = active ? this.#questionRows(active.question)[active.state.cursorIndex] : undefined;
-		if (!active || !rowItem) return;
-		void this.#promptForNote(active.question, active.state, rowItem);
+		if (!active) return undefined;
+		const last = this.#justAnswered;
+		if (last && last.questionIndex !== this.#currentQuestionIndex() && !isAnswered(active.state)) {
+			const question = this.#questions[last.questionIndex];
+			const state = this.#states[last.questionIndex];
+			const rowItem = question ? this.#questionRows(question).find(row => row.key === last.rowKey) : undefined;
+			if (question && state && rowItem) return { question, state, rowItem };
+		}
+		const rowItem = this.#questionRows(active.question)[active.state.cursorIndex];
+		return rowItem ? { question: active.question, state: active.state, rowItem } : undefined;
 	}
 
 	/** Re-describe once a second while a countdown ring is shown (the ring's value is data, not a terminal clock). */
@@ -1334,9 +1377,7 @@ export class AskDialogComponent implements Component {
 		const rowItem = rows[state.cursorIndex];
 		if (!rowItem) return;
 		if (keyData === "n" || keyData === "N") {
-			if (rowItem.kind === "option" || rowItem.kind === "other") {
-				void this.#promptForNote(question, state, rowItem);
-			}
+			this.#pressNote();
 			return;
 		}
 		const isEnter = matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n";
@@ -1364,7 +1405,7 @@ export class AskDialogComponent implements Component {
 				// focused option; Space toggles. Advances to the next question
 				// (submitting only for a single-question dialog), matching
 				// single-select Enter (#8252).
-				this.#advanceAfterQuestion();
+				this.#advanceAfterQuestion(state.selectedOptions.has(option.label) ? rowItem.key : undefined);
 				return;
 			}
 			if (state.selectedOptions.has(option.label)) {
@@ -1380,7 +1421,7 @@ export class AskDialogComponent implements Component {
 		state.customInput = undefined;
 		state.customInputImages = undefined;
 		clearNoteUnlessRow(state, rowItem.key);
-		this.#advanceAfterQuestion();
+		this.#advanceAfterQuestion(rowItem.key);
 	}
 
 	#handleSubmitTabInput(keyData: string): void {
@@ -1405,8 +1446,13 @@ export class AskDialogComponent implements Component {
 		this.#submitScrollOffset = 0;
 	}
 
-	#advanceAfterQuestion(): void {
+	/** Move past the current question; `answeredRowKey` is the row whose pick did it, for {@link #noteTarget}. */
+	#advanceAfterQuestion(answeredRowKey?: string): void {
 		const current = this.#currentQuestionIndex();
+		this.#justAnswered =
+			answeredRowKey !== undefined && this.#questions.length > 1
+				? { questionIndex: current, rowKey: answeredRowKey }
+				: undefined;
 		if (this.#questions.length === 1) {
 			this.#finishSubmit();
 			return;
@@ -1458,7 +1504,7 @@ export class AskDialogComponent implements Component {
 				this.#activeTabIndex = this.#submitTabIndex();
 				this.#submitScrollOffset = 0;
 			} else {
-				this.#advanceAfterQuestion();
+				this.#advanceAfterQuestion(rowItem.key);
 			}
 		} finally {
 			this.#promptActive = false;
@@ -1590,7 +1636,7 @@ export class AskDialogComponent implements Component {
 			const label = questionTabLabel(question, index);
 			const answer = renderAnswerSummary(question, state);
 			allLines.push(`${theme.fg("dim", `${index + 1}. ${label}:`)} ${answer}`);
-			const submittedNote = noteForSubmittedAnswer(question, state);
+			const submittedNote = noteForSubmittedAnswer(question, state)?.text;
 			if (submittedNote?.trim()) {
 				const note = normalizedInlineInput(submittedNote);
 				allLines.push(
@@ -1724,8 +1770,9 @@ export class AskDialogComponent implements Component {
 				selectedOptions,
 				customInput: state.customInput,
 				customInputImages: state.customInputImages,
-				note,
+				note: note?.text,
 				noteImages: note === undefined ? undefined : state.noteImages,
+				noteOption: note?.option,
 				timedOut: state.timedOut || undefined,
 			});
 		}

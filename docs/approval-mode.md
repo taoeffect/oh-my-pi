@@ -17,13 +17,53 @@ When an execute-time caller supplies neither settings nor `autoApprove`, approva
 
 Configure with `tools.approvalMode`:
 
-| Mode             | Auto-approves           | Prompts for     |
-| ---------------- | ----------------------- | --------------- |
-| `always-ask`     | `read`                  | `write`, `exec` |
-| `write`          | `read`, `write`         | `exec`          |
-| `yolo` (default) | `read`, `write`, `exec` | none            |
+| Mode                | Auto-approves                                          | Prompts for                 |
+| ------------------- | ------------------------------------------------------ | --------------------------- |
+| `always-ask`        | `read`                                                 | `write`, `exec`             |
+| `always-ask-cached` | `read` without file targets, granted files and folders | file reads, `write`, `exec` |
+| `write`             | `read`, `write`                                        | `exec`                      |
+| `yolo` (default)    | `read`, `write`, `exec`                                | none                        |
 
 `--approval-mode <mode>` overrides the configured mode for the session. `--auto-approve` and `--yolo` force yolo execution even when an explicit `--approval-mode` is also supplied; tool/user denies and explicit tool prompt policies still apply.
+
+### Ask and remember (`always-ask-cached`)
+
+Ask and remember prompts like `always-ask`, and also before a tool reads a file it has not been granted. When the call reports the files or folders it touches, the prompt can remember them. Its select menu lists, in this order:
+
+- **Approve Directory: `<folder>`** grants the folder around the call, when the call names a filesystem path. A folder grant covers the files directly inside it, never a subfolder or anything below one. The prompt names the folder and lists up to 24 of its entries (directories end in `/`). Larger folders show the rest as a count.
+- **Approve File** (or **Approve** for a directory or URL target) grants the exact targets. It is left out when the only target is the folder itself.
+- **Always Approve Directory: `<folder>`** and **Always Approve File** (or **Always Approve**) grant the same things across sessions.
+- **Approve Once** approves this call only.
+- **Deny** refuses the call.
+
+An **Approve …** grant stays in memory for this conversation only: `/new`, a session switch, and other sessions in the same process start without it. An **Always …** grant is written to `approval-cache.db` in the agent directory and covers every later session.
+
+- Grants record the capability tier they authorized. A write grant also covers reads of the same target; a read grant never covers a write or exec call.
+- The tools that read files report the files and folders they touch: `read`, `grep`, `glob`, `ast_grep`, `find`, and the legacy `read`/`grep`/`find`/`ls` shims. A recursive search reaches below subfolders, so it needs a tree grant of its own; approving one also records the folder grant it includes. A root list such as `src;other` is keyed one root at a time.
+- Other read-tier tools (`lsp`, `debug`, `github`, `todo`, …) stay auto-approved as in `always-ask`. This mode decides when you are asked; it does not sandbox reads.
+- Reads of public web URLs are never gated. URLs whose host is `localhost`, a private, loopback, or link-local IP literal, a single-label name, or a `.local`/`.internal` name are gated like files. Hostnames are not resolved, so a public name that points at a private address is not detected. Internal URLs (`xd://…`, `local://…`) are keyed by their normalized form.
+- An exec or write call that reports no targets (`bash`, `eval`, `browser`, `task`, MCP tools) prompts as in `always-ask`, with the usual [session options](#session-scoped-approvals) (`task` gets only `Approve` and `Deny`).
+- A read of `file.ts:120-140` and a write to `file.ts` share one key: selectors are peeled, the path is resolved against the session cwd and through symlinks (including a symlinked parent of a file that does not exist yet), and on Windows case is folded.
+- Grant answers appear only on prompts the mode raised. Prompts forced by a tool policy, an `override` (bash critical commands), a `tools.approval.<tool>: prompt` rule, or a pending provider safety check offer no grant answers and record no grant.
+- `/forget-approvals` clears the database and the **Approve …** grants of every conversation for the active agent directory. It does not clear approvals given through the [session options](#session-scoped-approvals). Deleting rows (`DELETE FROM grants`) or the file works too; every check reads the database fresh, so no restart is needed.
+
+## Restricted folders
+
+`tools.restrictedFolders` lists folders where every action needs an explicit approval, whatever the approval mode (`yolo` and `--auto-approve` included) and whatever was remembered:
+
+```yaml
+tools:
+  restrictedFolders:
+    - ~/secrets
+    - C:/work/payments
+```
+
+- A restricted folder covers itself and everything below it. A call whose targets fall inside it (`read`, `write`, `edit`, `grep`, `glob`, `ast_grep`, `find`, and any tool reporting `approvalCacheTargets`) prompts with `Reason: Restricted folder: <folder>`. A recursive search rooted above a restricted folder prompts too, because it reads into it; a one-level listing of the parent does not.
+- Paths are compared like Ask and remember keys: `~` is expanded, relative entries resolve against the session cwd, symlinks are resolved, and on Windows case is folded. `/a/foo` never covers `/a/foobar`.
+- A tool that names no path (`bash`, `eval`, `browser`, MCP tools, eval preludes) is matched by the directory it runs in: its `cwd` argument when it has one, else the session cwd. The command text is not parsed, so a `bash` call running outside the folder that names a file inside it does not match; use a `tools.approval.bash` policy for that.
+- The prompt offers plain **Approve** / **Deny**: no session answer, no grant, and no ACP "Always allow" covers it, so every call asks again. A `deny` policy (tool or `tools.approval.<tool>: deny`) still denies.
+- Without an interactive UI (print mode, headless subagents, the Cursor exec bridge) the call is refused, like any other prompt with nobody to answer it.
+- The `/settings` panel edits the list as JSON under Interaction → Approvals. It is hidden when project config supplies the list, so a project value is never promoted to global config.
 
 ## User overrides
 
@@ -55,7 +95,7 @@ Resolution per tool call:
 3. In `yolo`, an explicit tool `allow`/`prompt` policy wins; otherwise the valid user policy wins, or the call is allowed. The `override` flag alone does not force a prompt in `yolo`.
 4. In non-yolo modes, an `override: true` decision allows only an accompanying tool `policy: allow`; every other non-denied case prompts.
 5. Without an override, an explicit tool `allow`/`prompt` policy wins, then a valid user policy wins.
-6. With no explicit policy, the active mode auto-approves or prompts by tier.
+6. With no explicit policy, the active mode auto-approves or prompts by tier. In `always-ask-cached`, a call whose `approvalCacheTargets` are all granted is allowed instead.
 
 Policy strings are trimmed and case-normalized. Invalid user values are ignored.
 
@@ -110,6 +150,8 @@ Approval prompts offer two extra options: `Approve <tool> Commands for Session` 
 
 The `task` tool is excluded from all of this. Its subject is a free-form prompt with no bounded operation to compare, and it runs its own tool calls behind its own approval gate, so `task` prompts offer only `Approve` and `Deny`.
 
+Ask and remember prompts that offer grants show no session options, and a session approval does not answer them.
+
 ## Defining approval on tools
 
 Built-in and custom tools share the same shape:
@@ -129,7 +171,10 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
 
 approval?: ToolApproval;
 formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
+approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 ```
+
+`approvalCacheTargets` returns the keys `always-ask-cached` checks and records for a call: absolute file paths (derive them with `approvalTargetKey` so selectors, cwd, and symlinks resolve the same way the built-in tools do) or normalized internal URLs. `ToolDefinition` and `CustomTool` accept the same hook. A tool that omits it is resolved by tier alone, as in `always-ask`.
 
 Examples:
 

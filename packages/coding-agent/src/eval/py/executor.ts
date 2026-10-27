@@ -19,7 +19,7 @@ import {
 import type { JsStatusEvent } from "../js/shared/types";
 import { getEnabledEvalPreludes } from "../preludes";
 import { updateEvalState } from "../state";
-import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import {
 	createKernelSessionRegistry,
 	formatSessionKernelTimeoutAnnotation,
@@ -32,7 +32,6 @@ import {
 import type { PythonShadowPlan, PythonShadowSnapshot } from "./kernel";
 import {
 	checkPythonKernelAvailability,
-	type KernelDisplayOutput,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
 	type KernelShutdownResult,
@@ -120,7 +119,7 @@ export interface PythonExecutorOptions {
 	emitStatus?: (event: JsStatusEvent) => void;
 	/**
 	 * Live status events streamed as they are emitted (both host-side bridge
-	 * helpers like `agent()` and kernel-side `display`/`log`/`phase`). Mirrors
+	 * helpers like `agent()` and kernel-side `log`/`phase`). Mirrors
 	 * what lands in `displayOutputs` so callers can render progress before the
 	 * cell finishes.
 	 */
@@ -162,8 +161,8 @@ export interface PythonResult {
 	outputLines: number;
 	/** Number of bytes included in the output text */
 	outputBytes: number;
-	/** Rich display outputs captured from display_data/execute_result */
-	displayOutputs: KernelDisplayOutput[];
+	/** Images, views and status events the cell emitted, in order */
+	displayOutputs: EvalDisplayOutput[];
 	/** Whether stdin was requested */
 	stdinRequested: boolean;
 }
@@ -522,16 +521,9 @@ async function invokePythonToolRequest(
 		signal: options.signal,
 		emitStatus: undefined,
 	});
-	let envelope: unknown;
 	try {
-		const execution = await kernel.invokeTool(request, {
-			id: runId,
-			signal: options.signal,
-			onDisplay: output => {
-				if (output.type === "json") envelope = output.data;
-			},
-		});
-		return { execution, envelope };
+		const execution = await kernel.invokeTool(request, { id: runId, signal: options.signal });
+		return { execution, envelope: execution.reply };
 	} finally {
 		unregister();
 	}

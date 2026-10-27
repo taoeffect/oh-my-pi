@@ -25,7 +25,6 @@ import type {
 import { code, compact, diff, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { diffStatsMeta, displayPath, errorText, fileDiffSection, noteText, resultText, statsText } from "./native-view";
-import { getLanguageFromPath } from "../lang-from-path";
 
 /** Display metadata returned by ast-edit. */
 export interface AstEditToolDetails {
@@ -155,9 +154,9 @@ function parseAstEditChanges(lines: readonly string[]): AstEditFileDiff[] {
 	return files;
 }
 
-/** A file's proposed rewrite as a `diff`: highlighted by the path's language, no path header. */
+/** A file's proposed rewrite as a `diff`: Tern highlights it by the file's grammar and draws no path header. */
 function astEditDiff(file: AstEditFileDiff): NativeNode {
-	return diff(file.lines.join("\n"), { lang: getLanguageFromPath(file.path) });
+	return diff(file.lines.join("\n"), { path: file.path });
 }
 
 /** The single rewrite pattern (`target:"pattern"`), or the rewrite count, for the head. */

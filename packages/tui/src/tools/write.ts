@@ -164,10 +164,12 @@ function describeFigure(figure: ToolFigure | undefined): NativeNode | undefined 
 	return { ...md(text, { role: "omp.tool.write.figure", stream: !figure.closed }), key: "figure" };
 }
 
-/** The written content as numbered code, keyed so it keeps its node as the figure above it comes and goes. */
+/**
+ * The written content as numbered code, highlighted by Tern from the file's path,
+ * keyed so it keeps its node as the figure above it comes and goes.
+ */
 function describeSource(rawPath: string, content: string): NativeNode {
-	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-	return { ...code(content, { lang, numbers: true, wrap: true }), key: "source" };
+	return { ...code(content, { path: rawPath || undefined, numbers: true, wrap: true }), key: "source" };
 }
 
 function countLines(text: string): number {

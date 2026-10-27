@@ -201,6 +201,19 @@ export interface CompactionSettings {
 export const DEFAULT_RESERVE_TOKENS = 16384;
 
 /**
+ * Hysteresis band under the compaction trigger. Maintenance counts as having
+ * resolved threshold pressure only when residual context lands at or below
+ * `COMPACTION_RECOVERY_BAND × threshold`. Re-checking against the raw threshold
+ * lets a pass keep reclaiming a trickle of the previous turn's output and land
+ * just under the line every turn, sustaining the auto-continue dead loop
+ * reported in #2275; the same band stops the context-full / snapcompact tail
+ * from re-firing on a history whose single most-recent kept turn already
+ * exceeds the threshold. {@link prepareCompaction} sizes the kept tail to land
+ * inside it.
+ */
+export const COMPACTION_RECOVERY_BAND = 0.8;
+
+/**
  * Hard ceiling on a generated compaction summary.
  *
  * The summary budget is `floor(0.8 * reserveTokens)`, and the effective reserve is
@@ -728,8 +741,15 @@ export interface SummaryOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Session routing key for remote compaction transports with sticky provider sessions. */
 	sessionId?: string;
-	/** Prompt-cache key for remote compaction transports that support provider prefix caching. */
+	/** Prompt-cache key for conventional summary requests, gated against the summarizing model. */
 	promptCacheKey?: string;
+	/**
+	 * Prompt-cache key for remote compaction requests, gated against the request
+	 * they send (`remoteCompaction.api`/`model` override, see
+	 * `remoteCompactionPolicyModel`). Defaults to {@link promptCacheKey} only when
+	 * omitted; an explicit `undefined` means the remote target gets no key.
+	 */
+	remotePromptCacheKey?: string;
 	/** Mutable provider state used to keep Codex compaction on the live session identity. */
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
@@ -1205,6 +1225,14 @@ export async function generateHandoff(
 	);
 }
 
+/** Result of the short-summary request before it is mapped to the optional field. */
+type ShortSummaryOutcome = { kind: "text"; text: string } | { kind: "failed"; error: string } | { kind: "aborted" };
+
+/**
+ * Generate the optional display summary. Cancellation propagates as an
+ * `AbortError`; every other failure or an empty answer yields `undefined`, so
+ * a completed full summary is never discarded for this display-only field.
+ */
 async function generateShortSummary(
 	recentMessages: AgentMessage[],
 	historySummary: string | undefined,
@@ -1213,7 +1241,7 @@ async function generateShortSummary(
 	apiKey: ApiKey,
 	signal?: AbortSignal,
 	options?: SummaryOptions,
-): Promise<string> {
+): Promise<string | undefined> {
 	const maxTokens = Math.min(512, Math.floor(0.2 * reserveTokens));
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(recentMessages);
 	const conversationText = serializeConversationForSummary(
@@ -1229,57 +1257,97 @@ async function generateShortSummary(
 	promptText += formatAdditionalContext(options?.extraContext);
 	promptText += SHORT_SUMMARY_PROMPT;
 
-	if (options?.remoteEndpoint) {
-		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
-			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+	let outcome: ShortSummaryOutcome;
+	try {
+		if (options?.remoteEndpoint) {
+			const endpoint = options.remoteEndpoint;
+			const remote = await withAuth(
+				apiKey,
+				key =>
+					requestRemoteCompaction(
+						endpoint,
+						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+						signal,
+						{ fetch: options?.fetch, model, apiKey: key },
+					),
+				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+			);
+			outcome = { kind: "text", text: remote.summary };
+		} else {
+			const response = await instrumentedCompleteSimple(
+				model,
+				{
+					systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT],
+					messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
+				},
+				{
+					maxTokens,
 					signal,
-					{ fetch: options?.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
-		return remote.summary;
+					apiKey,
+					reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+					initiatorOverride: options?.initiatorOverride,
+					metadata: options?.metadata,
+					fetch: options?.fetch,
+					sessionId: options?.sessionId,
+					promptCacheKey: options?.promptCacheKey,
+					providerSessionState: options?.providerSessionState,
+					codexCompaction: localCodexCompaction(options),
+				},
+				{
+					telemetry: options?.telemetry,
+					oneshotKind: "compaction_short_summary",
+					completeImpl: options?.completeImpl,
+					retry: summaryOneshotRetry(options),
+				},
+			);
+			switch (response.stopReason) {
+				case "aborted":
+					outcome = { kind: "aborted" };
+					break;
+				case "error":
+					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
+					break;
+				case "stop":
+				case "length":
+				case "toolUse":
+					outcome = {
+						kind: "text",
+						text: response.content
+							.filter((c): c is { type: "text"; text: string } => c.type === "text")
+							.map(c => c.text)
+							.join("\n"),
+					};
+					break;
+			}
+		}
+	} catch (err) {
+		outcome = signal?.aborted
+			? { kind: "aborted" }
+			: { kind: "failed", error: err instanceof Error ? err.message : String(err) };
 	}
 
-	const response = await instrumentedCompleteSimple(
-		model,
-		{
-			systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT],
-			messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
-		},
-		{
-			maxTokens,
-			signal,
-			apiKey,
-			reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
-			initiatorOverride: options?.initiatorOverride,
-			metadata: options?.metadata,
-			fetch: options?.fetch,
-			sessionId: options?.sessionId,
-			promptCacheKey: options?.promptCacheKey,
-			providerSessionState: options?.providerSessionState,
-			codexCompaction: localCodexCompaction(options),
-		},
-		{
-			telemetry: options?.telemetry,
-			oneshotKind: "compaction_short_summary",
-			completeImpl: options?.completeImpl,
-			retry: summaryOneshotRetry(options),
-		},
-	);
-
-	if (response.stopReason === "error") {
-		throw createSummarizationError("Short summary failed", response);
+	if (signal?.aborted) outcome = { kind: "aborted" };
+	switch (outcome.kind) {
+		case "aborted":
+			throw new AIError.AbortError("Short summary aborted", { cause: signal?.reason });
+		case "failed":
+			logger.warn("Compaction short summary skipped", {
+				error: outcome.error,
+				model: model.id,
+				provider: model.provider,
+			});
+			return undefined;
+		case "text":
+			if (outcome.text.trim() === "") {
+				logger.warn("Compaction short summary skipped", {
+					error: "empty answer",
+					model: model.id,
+					provider: model.provider,
+				});
+				return undefined;
+			}
+			return outcome.text;
 	}
-
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map(c => c.text)
-		.join("\n");
 }
 
 // ============================================================================
@@ -1457,9 +1525,27 @@ export function prepareCompaction(
 		compactionMessages.push(message);
 	}
 
-	const lastUsage = getLastAssistantUsage(pathEntries);
+	const postCompactionStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	const lastUsage = getLastAssistantUsage(
+		postCompactionStart > 0 ? pathEntries.slice(postCompactionStart) : pathEntries,
+	);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
 	let keepRecentTokens = settings.keepRecentTokens;
+	if (activeModel?.contextWindow && activeModel.contextWindow > 0) {
+		// The compacted context (kept tail + summary/prompt overhead) must land in
+		// the recovery band under the configured trigger, or it fires again at once.
+		// The trigger is the user's choice, so the kept tail gives way, not the trigger:
+		// it gets what the band leaves after the reserve floor (an upper bound on the
+		// summary), or half the band when the floor alone fills it.
+		const contextWindow = activeModel.contextWindow;
+		const recoveryBand = Math.floor(resolveThresholdTokens(contextWindow, settings) * COMPACTION_RECOVERY_BAND);
+		const reserveFloor = Math.min(
+			resolveBudgetReserveTokens(contextWindow, settings),
+			settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS,
+		);
+		const tailBudget = recoveryBand > reserveFloor ? recoveryBand - reserveFloor : Math.floor(recoveryBand / 2);
+		keepRecentTokens = Math.min(keepRecentTokens, Math.max(1, tailBudget));
+	}
 	if (lastUsage) {
 		const estimatedTokens = tokenizer.countMessages(compactionMessages);
 		const promptTokens = calculatePromptTokens(lastUsage);
@@ -1677,6 +1763,10 @@ export async function compact(
 		thinkingLevel: options?.thinkingLevel,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
+		remotePromptCacheKey:
+			options && Object.hasOwn(options, "remotePromptCacheKey")
+				? options.remotePromptCacheKey
+				: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
@@ -1815,7 +1905,7 @@ export async function compact(
 						forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
 						responsesLite: model.useResponsesLite,
 						sessionId: summaryOptions.sessionId,
-						promptCacheKey: summaryOptions.promptCacheKey,
+						promptCacheKey: summaryOptions.remotePromptCacheKey,
 						providerSessionState: summaryOptions.providerSessionState,
 						codexCompaction: createOpenAICodexCompactionRequestContext({
 							context: summaryOptions.codexCompaction,
@@ -1888,7 +1978,7 @@ export async function compact(
 			assertRemoteCompactionInputFits(trimmed, model);
 			const requestOptions = {
 				sessionId: summaryOptions.sessionId,
-				promptCacheKey: summaryOptions.promptCacheKey,
+				promptCacheKey: summaryOptions.remotePromptCacheKey,
 				retainedMessageBudget: settings.v2RetainedMessageBudget,
 				retainedUserItems,
 			};
@@ -1970,6 +2060,7 @@ export async function compact(
 						{
 							fetch: summaryOptions.fetch,
 							sessionId: summaryOptions.sessionId,
+							promptCacheKey: summaryOptions.remotePromptCacheKey,
 							providerSessionState: summaryOptions.providerSessionState,
 							codexCompaction: summaryOptions.codexCompaction,
 							rewriteOutputs,
@@ -2024,6 +2115,7 @@ export async function compact(
 	let nativeFirstKeptEntryId = firstKeptEntryId;
 	let nativeUsedTokens: number | undefined;
 	let nativeRetainedFiles: AnthropicCompactionFiles[] | undefined;
+	let nativeToolChanges: Record<string, unknown>[] | undefined;
 	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)) {
 		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
 		// Lead with the previous summary as the live context renders it:
@@ -2052,6 +2144,7 @@ export async function compact(
 											: {}),
 										...(previousNative.filesText ? { filesText: previousNative.filesText } : {}),
 										...(previousNative.retainedFiles ? { retainedFiles: previousNative.retainedFiles } : {}),
+										...(previousNative.toolChanges ? { toolChanges: previousNative.toolChanges } : {}),
 										...(previousNative.exactTail ? { exactTail: true as const } : {}),
 									}
 								: undefined,
@@ -2148,6 +2241,7 @@ export async function compact(
 			);
 			nativeSummary = remote.content;
 			nativeSignature = remote.signature;
+			nativeToolChanges = remote.toolChanges;
 			nativeUsedTokens = calculatePromptTokens(remote.usage);
 			usedRemoteCompaction = true;
 		} catch (err) {
@@ -2235,16 +2329,18 @@ export async function compact(
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 	if (nativeSummary !== undefined) {
-		// The replayed block stays byte-identical to the API's summary so it
-		// matches its signature. The harness file lists above travel
-		// separately: the converter replaces the summary message with the
-		// block and skips its text, so they would otherwise be invisible to
-		// this provider. Every other provider keeps reading the entry text.
+		// The replayed block (summary and any `tool_changes`) stays
+		// byte-identical to the API's output so it matches its signature. The
+		// harness file lists above travel separately: the converter replaces the
+		// summary message with the block and skips its text, so they would
+		// otherwise be invisible to this provider. Every other provider keeps
+		// reading the entry text.
 		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
 			content: nativeSummary,
 			...(nativeSignature ? { signature: nativeSignature } : {}),
+			...(nativeToolChanges ? { toolChanges: nativeToolChanges } : {}),
 			...(filesText ? { filesText } : {}),
 			...(nativeRetainedFiles ? { retainedFiles: nativeRetainedFiles } : {}),
 			exactTail: true,
@@ -2267,7 +2363,7 @@ export async function compact(
 
 	return {
 		summary,
-		shortSummary,
+		...(shortSummary !== undefined ? { shortSummary } : {}),
 		firstKeptEntryId: nativeSummary !== undefined ? nativeFirstKeptEntryId : firstKeptEntryId,
 		tokensBefore,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
@@ -2295,7 +2391,7 @@ async function generateTurnPrefixSummary(
 		preferredDialect(model.id),
 		resolveCatalogPolicy(model).classifierCotExtraction === true,
 	);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${formatAdditionalContext(options?.extraContext)}${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,

@@ -132,13 +132,30 @@ MV lib/welcome.py
 
 The mode prompts in `crates/pi-edit/prompts/` define the full syntax.
 
+`apply_patch` matches complete old/context lines in this order: exact, trailing
+whitespace trimmed, both ends trimmed, then Unicode punctuation normalized.
+It never uses substring or character-similarity matching, regardless of the
+fuzzy settings for other modes. Repeated context binds to the first match at
+or after the previous hunk; unmatched context rejects the entire envelope
+before any writes. Numeric prefixes in old and new lines remain literal text,
+not recovered line-number annotations.
+
+An `*** Update File` followed only by `*** Move to:` renames a UTF-8 file
+without changing its bytes or permissions. An empty update without a move
+still rejects, as do missing sources and occupied destinations.
+
+Envelope sections see the results of earlier sections in order. A move vacates
+its source before a later add, and subsequent updates can target the moved
+file. Preview and application validate this same virtual namespace before
+the first filesystem write; a later invalid section leaves all files unchanged.
+
 ## Output and side effects
 
 Hashline applies in one tool call; it does not use the staged `xd://resolve` / `xd://reject` flow used by `ast_edit`.
 
 A successful hashline section returns a fresh `[path#TAG]` header, optional block-resolution and move lines, a compact post-edit preview when available, and a `Warnings:` block when recovery or normalization produced warnings. `EditToolDetails` can include the unified `diff`, `firstChangedLine`, diagnostics, operation (`update` or `delete` in hashline mode), path/move metadata, `oldText` / `newText`, `snapshotsPruned`, and per-file results. Multi-section input returns one aggregate result. Stored before/after snapshot text is capped at 32,768 characters per file and across a multi-file result; later entries may retain their diff but omit snapshot text.
 
-Native parse/match/application and writer failures return `isError: true` with their diagnostic text; native bridge failures may throw. Updates run through the ACP bridge or LSP writethrough, so configured formatting can change the persisted text. A newly introduced syntax parse failure does not roll back the edit: it produces a warning, or an additional repair note when `edit.autoRepair.enabled` successfully repairs it.
+Native parse/match/application and writer failures return `isError: true` with their diagnostic text and `details.errorKind`, the engine's class of the failure: `unseen_lines`, `stale_tag`, `unknown_tag`, `other_file_tag` (a tag this session issued for another file), `missing_tag`, `header_only`, `out_of_range`, `ambiguous_boundary`, `no_change`, `file_not_found`, `parse`, `no_match`, `invalid_utf8`, `plan_mode`, `unresolved_url`, `io`, `write_failed`, or `apply` for the rest; a file's failure in a multi-file call keeps its own class, and `/session` counts failed edits by it. Native bridge failures may throw. Updates run through the ACP bridge or LSP writethrough, so configured formatting can change the persisted text. A newly introduced syntax parse failure does not roll back the edit: it produces a warning, or an additional repair note when `edit.autoRepair.enabled` successfully repairs it.
 
 The streaming renderer parses complete portions of an in-flight payload and computes read-only diffs. Streaming preview skips transient unresolved blocks, stale tags, and empty pastes rather than presenting partial input as a final failure. Execution re-reads and validates normally.
 
@@ -147,11 +164,13 @@ For multi-section calls, every section is parsed and prepared before writes begi
 ## Limits and validation
 
 - Snapshot tags are four uppercase hexadecimal characters derived from normalized file content and recorded in the session snapshot store.
-- `read`/`grep` exposure matters: with `edit.enforceSeenLines=true` (default), edits targeting lines outside recorded visible ranges are rejected. Re-read elided or undisplayed ranges before editing them.
+- A section with a placeholder tag (`#AUTO`, `#????`, a bare `#`) or no tag, and input that is only a header with no ops, are rejected without writing. Like an unknown-tag mismatch, the reply carries the file's current tag, plus anchored context when the section has anchors.
+- `read`/`grep` exposure matters: with `edit.enforceSeenLines=true` (default), edits targeting lines outside recorded visible ranges are rejected. Re-read elided or undisplayed ranges before editing them. When the store holds no read of the tagged content (new process, evicted snapshot), only anchors on lines longer than the narrowest display column cap (grep's 512 bytes, or a lower `tools.outputMaxColumns`) are rejected, since only those can have been shown cut.
 - Ranges are inclusive, must be ordered, and are bounded by a parser amplification limit of 100,000 expanded lines before the target file's actual bounds are checked.
 - Conflicting overlapping ranges are rejected. Exact repeated replacement ranges can coalesce to the later body with a warning; author one final-content hunk per range.
+- The rows a mismatch reply prints count as seen for a resend under the tag it hands back: content no retained snapshot holds starts from them, and a retained read's seen set gains them. A resend anchored elsewhere gets the seen-line rejection and reveal. Content recorded with no or an empty seen set (as `write` records) stays unrestricted.
 - Same-path sections are merged so their original line anchors apply together. Clipboard operations are rejected if interleaved same-path sections would make authored register order ambiguous.
-- Stale tags attempt snapshot-based recovery. Recovery applies only when the recorded snapshot chain proves a unique safe result; otherwise a mismatch with current context is returned.
+- Stale tags attempt snapshot-based recovery. Recovery applies only when the recorded snapshot chain proves a unique safe result; otherwise a mismatch with current context is returned. A recovery that shifts line numbers is also refused when a replacement body closely matches the current lines at its authored numbers but not the lines the shift targets (a heuristic for numbers read from the current file instead of the tagged read), or when it breaks the syntax of a file that parsed.
 - A single-section byte-identical edit returns a no-change diagnostic without writing; the third consecutive identical no-op is an error. In multi-section calls, any no-op rejects the batch before writes.
 - `edit.blockAutoGenerated=true` (default) rejects files recognized as generated. Plan mode permits updates only within writable roots and refuses all deletes/moves.
 - A target that is not a regular file (FIFO, socket, character or block device, including through a symlink) is refused in every mode: reading it in-process can block forever or never end.

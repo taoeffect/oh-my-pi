@@ -5,21 +5,34 @@ import * as path from "node:path";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	buildSessionOptions as buildCliSessionOptions,
+	rebuildScopedModels,
+	resolveScopedModels,
+} from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	getRetryFallbackRole,
+	installRetryFallbackRole,
+	type RetryFallbackRole,
+} from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -1328,6 +1341,95 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("keeps an explicitly empty inherited chain empty for a deferred singleton sharing the default model", async () => {
+		const primary = "runtime-provider/runtime-model";
+		const fallback = "runtime-provider/runtime-fallback-model";
+		const role = "subagent:deferred-empty";
+		const ownerSettings = () => {
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [fallback] } });
+			settings.setModelRole("default", primary);
+			return settings;
+		};
+		// Live chain lookup on the primary: the persisted role must win over `default`, which shares the model.
+		const chainFor = (session: AgentSession) => {
+			const recovery = new TurnRecovery({
+				model: () => session.model,
+				thinkingLevel: () => undefined,
+				sessionManager: session.sessionManager,
+				settings: session.settings,
+				modelRegistry: session.modelRegistry,
+				configWarnings: [],
+			} as unknown as TurnRecoveryHost);
+			const keys = recovery.retryFallbackChainKeys(primary);
+			const candidates = keys.flatMap(key =>
+				recovery.findRetryFallbackCandidates(key, primary).map(candidate => candidate.raw),
+			);
+			return { keys, candidates };
+		};
+		const sessionManager = SessionManager.create(tempDir, path.join(tempDir, "sessions"));
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const { session } = await createAgentSession({
+			...buildSessionOptions(primary),
+			settings: ownerSettings(),
+			sessionManager,
+			modelPatternFallbackRole: role,
+			modelPatternDefaultFallbackChain: [],
+		});
+
+		let retryFallback: RetryFallbackRole | undefined;
+		try {
+			expect(chainFor(session)).toEqual({ keys: [role], candidates: [] });
+
+			// A runtime fallback answers; resume must still restore the primary as the default.
+			session.sessionManager.appendModelChange(fallback, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			session.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				api: "openai-completions",
+				provider: "runtime-provider",
+				model: "runtime-fallback-model",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			const context = session.sessionManager.buildSessionContext();
+			expect(getRestorableSessionModels(context.models, session.sessionManager.getLastModelChangeRole())).toEqual([
+				primary,
+			]);
+
+			// Switching back to the primary is temporary too; the role's empty chain must still own it.
+			session.sessionManager.appendModelChange(primary, EPHEMERAL_MODEL_CHANGE_ROLE);
+			expect(chainFor(session)).toEqual({ keys: [role], candidates: [] });
+			retryFallback = getRetryFallbackRole(session.settings, role);
+		} finally {
+			await session.dispose();
+		}
+		if (!retryFallback) throw new Error("Expected the deferred role's retry fallback");
+
+		// Cold revival reopens the transcript and reinstalls the persisted role before resuming.
+		const reviveSettings = ownerSettings();
+		installRetryFallbackRole(reviveSettings, role, retryFallback);
+		const { session: revived } = await createAgentSession({
+			...buildSessionOptions(primary),
+			settings: reviveSettings,
+			sessionManager: await SessionManager.open(sessionFile, undefined, undefined, { throwIfMissing: true }),
+		});
+		try {
+			expect(`${revived.model?.provider}/${revived.model?.id}`).toBe(primary);
+			expect(chainFor(revived)).toEqual({ keys: [role], candidates: [] });
+		} finally {
+			await revived.dispose();
+		}
+	});
+
 	test("splits deferred comma-delimited modelPattern and installs fallback chain", async () => {
 		const { session } = await createAgentSession({
 			...buildSessionOptions("runtime-provider/runtime-model,runtime-provider/runtime-fallback-model"),
@@ -1939,10 +2041,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	test("prefers the provider default over catalog order in the startup fallback", async () => {
 		// Regression: with an Anthropic key but no configured `default` role and no
 		// session/CLI model, the step-4 startup fallback used to pick the first
-		// anthropic model in models.json catalog order (claude-3-5-sonnet-20240620)
-		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER.
+		// anthropic model in models.json catalog order instead of the provider default.
 		const providerDefault = getBundledModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic);
-		const catalogFirst = getBundledModel("anthropic", "claude-3-5-sonnet-20240620");
+		const catalogFirst = getBundledModels("anthropic")[0];
 		if (!providerDefault || !catalogFirst) {
 			throw new Error("Expected bundled anthropic models for fallback regression");
 		}
@@ -2414,6 +2515,77 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			exitSpy.mockRestore();
 		}
 	});
+
+	test("adds extension models named by enabledModels to the session scope without waiting for background discovery (issue #6694)", async () => {
+		const configuredModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!configuredModel) {
+			throw new Error("Expected bundled anthropic configured model");
+		}
+		const configuredSelector = `${configuredModel.provider}/${configuredModel.id}`;
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime(configuredModel.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "scope-extension-models.yml"));
+		const settings = Settings.isolated({ enabledModels: ["runtime-provider/*", configuredSelector] });
+		const parsed = parseArgs([]);
+		const scopeIds = (scope: ReadonlyArray<{ model: { provider: string; id: string } }> | undefined) =>
+			scope?.map(scoped => `${scoped.model.provider}/${scoped.model.id}`);
+
+		// main.ts snapshots the scope before extensions register their providers.
+		const scopedModels = await resolveScopedModels(parsed, modelRegistry, settings);
+		expect(scopeIds(scopedModels)).toEqual([configuredSelector]);
+
+		const cliOptions = await buildCliSessionOptions(
+			parsed,
+			scopedModels,
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+		const { session } = await createAgentSession({
+			...cliOptions,
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			disableExtensionDiscovery: true,
+			extensions: [providerExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			// The provider is registered now, but the scoped /models list and the
+			// Ctrl+P cycle still hold the startup snapshot.
+			expect(scopeIds(session.scopedModels)).toEqual([configuredSelector]);
+
+			// A slow catalog refresh is still in flight; the extension models must
+			// not wait for it.
+			vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockReturnValue(Promise.withResolvers<void>().promise);
+			const rebuilt = await rebuildScopedModels(session, parsed, modelRegistry, settings);
+
+			const expected = [
+				"runtime-provider/runtime-model",
+				"runtime-provider/runtime-fallback-model",
+				configuredSelector,
+			];
+			expect(scopeIds(session.scopedModels)).toEqual(expected);
+			// main.ts announces the startup scope from the returned list.
+			expect(scopeIds(rebuilt)).toEqual(expected);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("pins the first CLI --models scoped model even when the saved default role is out of scope", async () => {
 		const scopedTarget = getBundledModel("openai", "gpt-4o-mini");
 		const savedDefault = getBundledModel("anthropic", "claude-sonnet-4-5");
