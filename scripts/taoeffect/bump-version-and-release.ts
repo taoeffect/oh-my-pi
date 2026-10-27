@@ -22,13 +22,15 @@ Cuts a fork release from the committed HEAD of the release branch:
   1. Read the fork version from npm/package.json and the upstream base merged
      into HEAD (packages/natives/package.json, must equal packages/utils).
   2. Newer base: <base>-taoeffect.1. Same base: next taoeffect iteration.
-  3. Write npm/package.json, commit it, create the annotated tag v<version>,
+  3. Check that the remote is reachable with working credentials, so a run
+     inside a sandbox without SSH keys stops before anything changes.
+  4. Write npm/package.json, commit it, create the annotated tag v<version>,
      and push branch and tag in one atomic push. The tag push starts
      .github/workflows/release-taoeffect.yml.
 
 Options:
   --dry-run             Print the next version and the commands; change nothing.
-                        Skips the clean-tree and branch checks.
+                        Skips the clean-tree, branch, and remote access checks.
   --remote <name>       Remote to push to (default: ${FORK_REMOTE}).
   --branch <name>       Branch that must be checked out and is pushed
                         (default: ${RELEASE_BRANCH}).
@@ -36,6 +38,36 @@ Options:
 
 function git(args: readonly string[]) {
 	return $`git ${args}`.cwd(REPO_ROOT).quiet();
+}
+
+async function hasCustomSshCommand(): Promise<boolean> {
+	if (process.env.GIT_SSH_COMMAND || process.env.GIT_SSH) return true;
+	const result = await git(["config", "--get", "core.sshCommand"]).nothrow();
+	return result.exitCode === 0 && result.text().trim() !== "";
+}
+
+// `git ls-remote` logs in to the remote the same way push does, but only reads
+// the branch list, so it changes nothing locally or remotely. BatchMode and
+// GIT_TERMINAL_PROMPT=0 make it fail fast instead of waiting for a passphrase,
+// host key, or password prompt. A custom SSH command set by the user is kept.
+async function assertRemoteAccess(remote: string): Promise<void> {
+	const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+	if (!(await hasCustomSshCommand())) env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=10";
+	const result = Bun.spawnSync(["git", "ls-remote", "--heads", remote], {
+		cwd: REPO_ROOT,
+		env,
+		stdin: "ignore",
+		stdout: "ignore",
+		stderr: "pipe",
+		timeout: 30_000,
+	});
+	if (result.exitCode === 0) return;
+	const details =
+		result.stderr.toString().trim() ||
+		(result.exitedDueToTimeout ? "timed out after 30s" : `exit code ${result.exitCode}`);
+	throw new Error(
+		`Cannot access remote ${remote}. Nothing was changed.\nAre you in a sandbox without SSH keys? Re-run this script outside it.\ngit ls-remote said: ${details}`,
+	);
 }
 
 async function main(): Promise<void> {
@@ -83,6 +115,7 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	await assertRemoteAccess(values.remote);
 	await prepareRelease(next.version, { check: false });
 	for (const [index, command] of commands.entries()) {
 		console.log(`$ ${formatCommand(command)}`);
