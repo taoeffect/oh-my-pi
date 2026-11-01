@@ -8,12 +8,14 @@
  */
 import * as path from "node:path";
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
-import { replaceTabs } from "@oh-my-pi/pi-tui";
+import { replaceTabs, TERMINAL } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { normalizeToLF } from "../edit/normalize";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
+import { cfgApprovalNotify } from "../modes/settings";
+import { isWarpCliAgentProtocolActive } from "../modes/warp-events";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
 import {
 	type ApprovalGrantStore,
@@ -853,4 +855,23 @@ export async function selectApprovalGrant(
 		if (choice === grant.alwaysLabel) return { grant: grant.scope, always: true };
 	}
 	return "deny";
+}
+
+/**
+ * Tell the user an approval menu is waiting: a terminal notification, which under tmux also rings
+ * the bell. Opt-in through `approval.notify`; without settings it stays silent. Call it just before
+ * the menu opens, so a call that a session grant answers stays silent. Under Warp's structured
+ * protocol, the `permission_request` event already drives Warp's own approval UX, so no second
+ * toast is sent.
+ */
+export function notifyApprovalWaiting(settings: Settings | undefined, toolName: string, sessionName?: string): void {
+	if (!settings || cfgApprovalNotify.get(settings) !== "on") return;
+	if (isWarpCliAgentProtocolActive()) return;
+	TERMINAL.sendNotification({
+		title: sessionName || "omp",
+		body: `Waiting for approval: ${toolName}`,
+		type: "approval",
+		urgency: "normal",
+		actions: "focus",
+	});
 }

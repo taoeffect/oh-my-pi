@@ -12,6 +12,7 @@ import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wi
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -3032,6 +3033,54 @@ describe("ExtensionRunner", () => {
 				expect(resultText(second)).toBe("ok");
 				expect(select).toHaveBeenCalledTimes(1);
 				expect(classify).not.toHaveBeenCalled();
+			});
+
+			it("with approval.notify on, notifies when the menu opens, and not for a call a session grant answers", async () => {
+				const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+				const select = vi.fn(async (_title: string, _options: ExtensionUISelectItem[]) => {
+					expect(notify).toHaveBeenCalledTimes(1);
+					return "Approve dangerous_tool Commands for Session";
+				});
+				const wrapper = new ExtensionToolWrapper(approvalTool, await makeRunner(select));
+				const settings = Settings.isolated({ "tools.approvalMode": "always-ask", "approval.notify": "on" });
+
+				await (wrapper as ExtensionToolWrapper<any>).execute(
+					"call-notify-1",
+					{},
+					undefined,
+					undefined,
+					makeContext({ settings }),
+				);
+				await (wrapper as ExtensionToolWrapper<any>).execute(
+					"call-notify-2",
+					{},
+					undefined,
+					undefined,
+					makeContext({ settings }),
+				);
+
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(notify).toHaveBeenCalledTimes(1);
+				expect(notify).toHaveBeenCalledWith(
+					expect.objectContaining({ title: "omp", body: "Waiting for approval: dangerous_tool" }),
+				);
+			});
+
+			it("sends no approval notification by default", async () => {
+				const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+				const select = vi.fn(async (_title: string, _options: ExtensionUISelectItem[]) => "Approve");
+				const wrapper = new ExtensionToolWrapper(approvalTool, await makeRunner(select));
+
+				await (wrapper as ExtensionToolWrapper<any>).execute(
+					"call-notify-default",
+					{},
+					undefined,
+					undefined,
+					makeContext(),
+				);
+
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(notify).not.toHaveBeenCalled();
 			});
 
 			it("uses ACP approval before similar grants without approving later arguments", async () => {

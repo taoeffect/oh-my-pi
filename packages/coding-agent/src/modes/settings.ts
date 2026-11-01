@@ -1280,6 +1280,19 @@ export const cfgAskNotify = register({
 	},
 });
 
+export const cfgApprovalNotify = register({
+	id: "approval.notify",
+	type: "enum",
+	values: ["on", "off"] as const,
+	default: "off",
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Approval Notification",
+		description: "Notify when a tool call is waiting for approval (rings the bell under tmux)",
+	},
+});
+
 export const cfgRecapEnabled = register({
 	id: "recap.enabled",
 	type: "boolean",

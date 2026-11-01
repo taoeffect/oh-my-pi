@@ -17,6 +17,7 @@ import {
 	approvalRestrictions,
 	denyError,
 	formatApprovalPrompt,
+	notifyApprovalWaiting,
 	offersApprovalGrants,
 	recordApprovalGrant,
 	resolveApproval,
@@ -553,6 +554,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				: ["Approve", "Deny"];
 			let choice: string | undefined;
 			let approved: boolean;
+			notifyApprovalWaiting(approvalSettings, this.tool.name, context?.sessionManager?.getSessionName());
 			try {
 				if (grantPrompt) {
 					const answer = await selectApprovalGrant(uiContext, this.tool, resolvedArgs, basePrompt);

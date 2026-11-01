@@ -5,6 +5,7 @@ import {
 	approvalRestrictions,
 	denyError,
 	formatApprovalPrompt,
+	notifyApprovalWaiting,
 	resolveApproval,
 	resolveApprovalFromContext,
 } from "../tools/approval";
@@ -120,6 +121,7 @@ async function approvePreludeInvocation(
 				`Set tools.approval.${definition.name}: allow or use an interactive UI to approve the call.`,
 		);
 	}
+	notifyApprovalWaiting(settings, definition.name, context.context?.sessionManager?.getSessionName());
 	const choice = await untilAborted(context.signal, () =>
 		ui.select(formatApprovalPrompt(subject, parameters, resolved.reason), ["Approve", "Deny"]),
 	);
