@@ -54,7 +54,11 @@ import { recoverAskQuestions } from "../../tools/ask";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
-import { isSessionGrantExcluded, isToolApprovedForSession } from "../../tools/session-approvals";
+import {
+	hasSessionApprovalGrants,
+	isSessionGrantExcluded,
+	isToolApprovedForSession,
+} from "../../tools/session-approvals";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
@@ -152,6 +156,13 @@ interface ApprovalPreviewGate {
 	resolve(): void;
 	reject(reason?: unknown): void;
 	started: boolean;
+	/** The wrapper waits on the gate only right before it opens the approval menu. */
+	prompted: boolean;
+}
+/** A tool call's `blocked` status; `untilMenuOpens` holds it until the approval menu opens. */
+interface BlockingPrompt {
+	status: RunStatus;
+	untilMenuOpens: boolean;
 }
 
 /**
@@ -210,6 +221,9 @@ export class EventController {
 	 *  `blocked` status each reports; cleared at their tool_execution_end so the
 	 *  run returns to `working` once none is left. */
 	#blockingPrompts = new Map<string, RunStatus>();
+	/** `blocked` statuses of approval calls a similar or file grant may still
+	 *  answer with no menu, keyed by call id; reported once the menu opens. */
+	#heldBlockingPrompts = new Map<string, RunStatus>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
@@ -525,14 +539,26 @@ export class EventController {
 		let gate = this.#approvalPreviewGates.get(toolCallId);
 		if (!gate) {
 			const deferred = Promise.withResolvers<void>();
-			gate = { ...deferred, started: false };
+			gate = { ...deferred, started: false, prompted: false };
 			this.#approvalPreviewGates.set(toolCallId, gate);
 		}
 		return gate;
 	}
 
 	async #waitForToolApprovalPreview(toolCallId: string): Promise<void> {
-		await this.#approvalPreviewGate(toolCallId).promise;
+		const gate = this.#approvalPreviewGate(toolCallId);
+		gate.prompted = true;
+		const held = this.#heldBlockingPrompts.get(toolCallId);
+		if (held) {
+			this.#heldBlockingPrompts.delete(toolCallId);
+			this.#reportBlockingPrompt(toolCallId, held);
+		}
+		await gate.promise;
+	}
+
+	#reportBlockingPrompt(toolCallId: string, status: RunStatus): void {
+		this.#blockingPrompts.set(toolCallId, status);
+		setRunStatus(status);
 	}
 
 	#startToolApprovalPreview(toolCallId: string): void {
@@ -953,6 +979,7 @@ export class EventController {
 		this.#backgroundCallIds.clear();
 		this.#settledBeforeReturn.clear();
 		this.#blockingPrompts.clear();
+		this.#heldBlockingPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -1883,10 +1910,11 @@ export class EventController {
 		this.#updateWorkingMessageFromIntent(event.intent);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
-		const blocked = this.#blockingPrompt(renderToolName, event.args);
-		if (blocked) {
-			this.#blockingPrompts.set(event.toolCallId, blocked);
-			setRunStatus(blocked);
+		const blocking = this.#blockingPrompt(renderToolName, event.args);
+		if (blocking?.untilMenuOpens && !this.#approvalPreviewGates.get(event.toolCallId)?.prompted) {
+			this.#heldBlockingPrompts.set(event.toolCallId, blocking.status);
+		} else if (blocking) {
+			this.#reportBlockingPrompt(event.toolCallId, blocking.status);
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
@@ -1988,16 +2016,15 @@ export class EventController {
 	 * wrapper's own condition). A grant that covers such a call's targets makes
 	 * `resolveApproval` allow it, so it never reaches the session check.
 	 *
-	 * The grants that need a subject — a recorded similar subject, a session
-	 * file grant — are deliberately NOT consulted: they may still end in a
-	 * prompt, which makes `blocked` the conservative correct answer, and
-	 * reading them here would mean re-deriving write targets from partially
-	 * streamed args in a render path.
+	 * A similar-subject or session file grant ("Approve Similar …") is judged by
+	 * the wrapper's model classifier, which may still run the call with no menu.
+	 * Such a call holds its status (`untilMenuOpens`) until the wrapper waits on
+	 * the approval preview, which it does only right before it opens the menu.
 	 */
-	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
+	#blockingPrompt(toolName: string, args: unknown): BlockingPrompt | undefined {
 		if (toolName === "ask") {
 			const questions = recoverAskQuestions(args)?.map(question => question.question);
-			return { state: "blocked", kind: "question", msg: questions?.join(" ") };
+			return { status: { state: "blocked", kind: "question", msg: questions?.join(" ") }, untilMenuOpens: false };
 		}
 		const tool = this.ctx.viewSession.getToolByName(toolName);
 		if (!tool) return undefined;
@@ -2026,10 +2053,15 @@ export class EventController {
 			!isSessionGrantExcluded(toolName) &&
 			!hasPendingSafetyChecks &&
 			!offersApprovalGrants(tool, args, approval, grants, hasPendingSafetyChecks);
-		if (sessionGrantMayAnswer && isToolApprovedForSession(this.ctx.sessionManager.getSessionId(), toolName)) {
-			return undefined;
-		}
-		return { state: "blocked", kind: "permission", msg: formatApprovalPrompt(tool, args, approval.reason) };
+		const status: RunStatus = {
+			state: "blocked",
+			kind: "permission",
+			msg: formatApprovalPrompt(tool, args, approval.reason),
+		};
+		if (!sessionGrantMayAnswer) return { status, untilMenuOpens: false };
+		const sessionId = this.ctx.sessionManager.getSessionId();
+		if (isToolApprovedForSession(sessionId, toolName)) return undefined;
+		return { status, untilMenuOpens: hasSessionApprovalGrants(sessionId, toolName) };
 	}
 
 	async #handleToolExecutionUpdate(
@@ -2158,6 +2190,7 @@ export class EventController {
 		// waits — the run reports that prompt instead. `ask` ids are in the map too
 		// (added at tool_execution_start), so the delete also covers them without
 		// leaking ids until turn end.
+		this.#heldBlockingPrompts.delete(event.toolCallId);
 		if (this.#blockingPrompts.delete(event.toolCallId)) {
 			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
 		}
@@ -2502,6 +2535,7 @@ export class EventController {
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();
+		this.#heldBlockingPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);

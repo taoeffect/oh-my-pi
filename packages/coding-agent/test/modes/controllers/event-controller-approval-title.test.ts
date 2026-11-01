@@ -10,7 +10,9 @@
  * carried by the computer tool's synthetic event args, a tool-demanded
  * `override`, a `task` call, which no session grant may cover, and an
  * `always-ask-cached` call with targets, which offers folder and file grants
- * instead) still block per call and must keep reporting `blocked`.
+ * instead) still block per call and must keep reporting `blocked`. A call a
+ * similar or file grant may answer reports `blocked` only once the wrapper
+ * opens the approval menu, since its classifier may run the call with none.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
@@ -22,7 +24,12 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { approveToolForSession, clearSessionApprovals } from "@oh-my-pi/pi-coding-agent/tools/session-approvals";
+import {
+	addSimilarApproval,
+	approvalIdentity,
+	approveToolForSession,
+	clearSessionApprovals,
+} from "@oh-my-pi/pi-coding-agent/tools/session-approvals";
 import { cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import type { RunStatus } from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
@@ -45,6 +52,9 @@ const overrideTool = {
 /** `task` is excluded from every session grant, so its prompt always blocks. */
 const taskTool = { name: "task", approval: { tier: "exec" } } as unknown as AgentTool;
 
+/** The wrapper calls the controller's approval-preview waiter right before it opens the approval menu. */
+let openApprovalMenu: (toolCallId: string) => Promise<void> = async () => {};
+
 function createFixture(tool: AgentTool = execTool): InteractiveModeContext {
 	const pendingTools = new Map<string, ToolExecutionComponent>();
 	const ctx = {
@@ -54,20 +64,32 @@ function createFixture(tool: AgentTool = execTool): InteractiveModeContext {
 		pendingTools,
 		chatContainer: new TranscriptContainer(),
 		toolOutputExpanded: false,
-		session: { isAborting: false },
+		session: {
+			isAborting: false,
+			extensionRunner: {
+				setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>) {
+					openApprovalMenu = waiter;
+					return () => {};
+				},
+			},
+		},
 		viewSession: { getToolByName: () => tool, hasBuiltInTool: () => false },
 		sessionManager: { getSessionId: () => SESSION_ID, getCwd: () => process.cwd() },
 	} as unknown as InteractiveModeContext;
 	return ctx;
 }
 
-async function startToolCall(ctx: InteractiveModeContext, toolCallId: string, args: unknown, toolName = "bash") {
-	await new EventController(ctx).handleEvent({
+function toolStart(toolCallId: string, args: unknown, toolName = "bash") {
+	return {
 		type: "tool_execution_start",
 		toolCallId,
 		toolName,
 		args,
-	} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
+	} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>;
+}
+
+async function startToolCall(ctx: InteractiveModeContext, toolCallId: string, args: unknown, toolName = "bash") {
+	await new EventController(ctx).handleEvent(toolStart(toolCallId, args, toolName));
 }
 
 type RunStatusSpy = Mock<(status: RunStatus) => void>;
@@ -157,5 +179,26 @@ describe("EventController approval run-status mirror", () => {
 		ctx = createFixture(writeTool as unknown as AgentTool);
 		await startToolCall(ctx, "tc-8", { path: "a.txt" }, "write");
 		expect(permissionBlocks(statusSpy)).toBe(1);
+	});
+
+	it("reports blocked for a call a similar grant may answer only once the approval menu opens", async () => {
+		// The wrapper's classifier may run such a call with no menu; a `blocked`
+		// status at start rang tmux bells for commands nobody was asked about.
+		addSimilarApproval(SESSION_ID, "bash", "git status", approvalIdentity({ command: "git status" }));
+		const controller = new EventController(ctx);
+		await controller.handleEvent(toolStart("tc-9", { command: "git diff" }));
+		expect(permissionBlocks(statusSpy)).toBe(0);
+		const menu = openApprovalMenu("tc-9");
+		expect(permissionBlocks(statusSpy)).toBe(1);
+		await menu;
+	});
+
+	it("reports blocked at start when the approval menu opened before the controller saw the call", async () => {
+		addSimilarApproval(SESSION_ID, "bash", "git status", approvalIdentity({ command: "git status" }));
+		const controller = new EventController(ctx);
+		const menu = openApprovalMenu("tc-10");
+		await controller.handleEvent(toolStart("tc-10", { command: "git diff" }));
+		expect(permissionBlocks(statusSpy)).toBe(1);
+		await menu;
 	});
 });
