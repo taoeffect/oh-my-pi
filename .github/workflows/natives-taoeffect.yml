@@ -98,28 +98,15 @@ jobs:
          BAZEL_DISK_CACHE: /mnt/omp-bazel/disk-cache
          BAZEL_OUTPUT_ROOT: /mnt/omp-bazel/root
       steps:
-         # Deselects the compromised eMudhra roots (and the Comodo AAA root) in
-         # the runner's system trust store before any step makes a TLS request.
-         # Same step as "Fix Ubuntu runner CA root bundle" in
+         # Same step as "Update Ubuntu runner CA certificates" in
          # release-taoeffect.yml, which explains it; YAML anchors do not reach
          # across workflow files.
          # https://emudhra.we-have-a-problem.com/#linux
-         - name: Fix Ubuntu runner CA root bundle
+         - name: Update Ubuntu runner CA certificates
            run: |
-              sudo sed -i \
-                -e 's|^mozilla/emSign_ECC_Root_CA_-_G3\.crt$|!&|' \
-                -e 's|^mozilla/emSign_ECC_Root_CA_-_C3\.crt$|!&|' \
-                -e 's|^mozilla/emSign_Root_CA_-_C1\.crt$|!&|' \
-                -e 's|^mozilla/Comodo_AAA_Services_root\.crt$|!&|' \
-                /etc/ca-certificates.conf
-              grep -E 'emSign|Comodo_AAA' /etc/ca-certificates.conf || true
-              sudo update-ca-certificates
-              if openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt |
-                   openssl pkcs7 -print_certs -noout |
-                   grep -E 'emSign ECC Root CA - (G3|C3)|emSign Root CA - C1|AAA Certificate Services'; then
-                echo "::error::/etc/ssl/certs/ca-certificates.crt still trusts a compromised root"
-                exit 1
-              fi
+              sudo apt-get update
+              sudo apt-get install -y --only-upgrade ca-certificates 'libnss3*'
+              dpkg -l ca-certificates 'libnss3*' | grep ^ii
          # Runs before any build tool. The darwin leg needs about 25 GB, and the
          # ubuntu-24.04 image has about 86 GB free (/mnt is on the same disk).
          # The deletions take 30-130 s, so they run only when space is short.
