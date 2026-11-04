@@ -248,6 +248,30 @@ jobs:
       env:
          VERSION: ${{ needs.metadata.outputs.version }}
       steps:
+         # Removes the compromised eMudhra roots (and the Comodo AAA root that
+         # curl's fix also removes) from the preinstalled /etc/ssl/cert.pem
+         # before any step makes a TLS request. The step is inline because this
+         # job has no checkout to load a local action from. Each awk pass drops
+         # one named `=== ` block from the bundle. The result replaces the
+         # bundle only if it is not empty.
+         # https://emudhra.we-have-a-problem.com/#macos-curl
+         # https://raw.githubusercontent.com/curl/curl/f0da5390ad9d380807cc83e600196809df8bb96b/.github/actions/macos-fix-certs/action.yml
+         - name: Fix macOS runner CA root bundle
+           if: runner.os == 'macOS'
+           shell: bash
+           run: |
+              ls -lA /etc/ssl/cert.pem
+              t="$(mktemp)" && \
+                awk -v s='=== /C=IN/OU=emSign PKI/O=eMudhra Technologies Limited/CN=emSign ECC Root CA - G3' \
+                  '/^(===|###) /{skip=0} $0==s{skip=1} !skip' /etc/ssl/cert.pem | \
+                awk -v s='=== /C=US/OU=emSign PKI/O=eMudhra Inc/CN=emSign ECC Root CA - C3' \
+                  '/^(===|###) /{skip=0} $0==s{skip=1} !skip' | \
+                awk -v s='=== /C=US/OU=emSign PKI/O=eMudhra Inc/CN=emSign Root CA - C1' \
+                  '/^(===|###) /{skip=0} $0==s{skip=1} !skip' | \
+                awk -v s='=== /C=GB/ST=Greater Manchester/L=Salford/O=Comodo CA Limited/CN=AAA Certificate Services' \
+                  '/^(===|###) /{skip=0} $0==s{skip=1} !skip' > "$t" && \
+                [ -s "$t" ] && sudo install -m 0644 -o root -g wheel "$t" /etc/ssl/cert.pem; rm -f "$t"
+              ls -lA /etc/ssl/cert.pem
          - name: Download release archive
            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
            with:
