@@ -6,6 +6,7 @@
 
 - Extensions in the interactive TUI can read and directly switch plan, vibe, goal, and loop modes with `ctx.sessionModes` and observe changes with the `mode_changed` event, without submitting slash commands; `extensionHandlers.modeControl: false` turns off extension-driven mode changes ([#15753](https://github.com/can1357/oh-my-pi/pull/15753) by [@Shadorain](https://github.com/Shadorain))
 - Added the `approval.notify` setting (off by default): when `on`, tool approval menus send a terminal notification, which also rings the bell under tmux
+- Added `/yolo` to turn yolo mode (like `--yolo`) on or off in the interactive TUI until omp exits; turning it off restores the previous approval mode
 
 ### Fixed
 

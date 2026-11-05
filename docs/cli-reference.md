@@ -143,7 +143,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--no-lsp` | Disable LSP tools, formatting, and diagnostics. |
 | `--no-pty` | Disable PTY-based interactive bash execution. |
 | `--approval-mode <mode>` | Override `tools.approvalMode` for this session (`always-ask`, `always-ask-cached`, `write`, or `yolo`). See [approval mode](./approval-mode.md). |
-| `--auto-approve`, `--yolo` | Force yolo tier approval; explicit tool/user policies and provider safety checks still apply. |
+| `--auto-approve`, `--yolo` | Force yolo tier approval; explicit tool/user policies and provider safety checks still apply. In the TUI, `/yolo` turns this off or on until omp exits. |
 | `--advisor` | Enable the advisor runtime (passively reviews each turn and injects notes). See [advisor / watchdog](./advisor-watchdog.md). |
 | `--wait-async` | Print mode: before exiting, wait for this run's background jobs and start another turn in the same session with each result (`async.printWake`). See [Headless / print mode](#headless--print-mode). |
 | `--max-time <duration>` | Stop the session after this duration (e.g. `600`, `10m`, `1h`). |

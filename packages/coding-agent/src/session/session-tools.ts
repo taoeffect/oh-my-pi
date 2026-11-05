@@ -533,6 +533,15 @@ export class SessionTools {
 		this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 	}
 
+	/** Whether `--yolo` / `/yolo` auto-approval is on. */
+	get autoApprove(): boolean {
+		return this.#autoApprove;
+	}
+
+	set autoApprove(enabled: boolean) {
+		this.#autoApprove = enabled;
+	}
+
 	/** Mutable registry shared with controller hosts that inspect available tools. */
 	get registry(): Map<string, AgentTool> {
 		return this.#toolRegistry;

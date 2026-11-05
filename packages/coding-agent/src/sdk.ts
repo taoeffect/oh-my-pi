@@ -3556,7 +3556,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			settings,
 			localProtocolOptions,
-			autoApprove: options.autoApprove ?? false,
+			// Live: `/yolo` toggles it on the session after startup.
+			autoApprove: hasSession ? session.isAutoApproveEnabled() : options.autoApprove === true,
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext, trackUserWait);
 		toolSession.getToolContext = () => toolContextStore.getContext();

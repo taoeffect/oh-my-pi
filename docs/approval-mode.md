@@ -26,6 +26,8 @@ Configure with `tools.approvalMode`:
 
 `--approval-mode <mode>` overrides the configured mode for the session. `--auto-approve` and `--yolo` force yolo execution even when an explicit `--approval-mode` is also supplied; tool/user denies and explicit tool prompt policies still apply.
 
+In the interactive TUI, `/yolo` turns the same yolo behavior on or off until omp exits. Turning it off returns to the mode that was in effect before yolo: the configured `tools.approvalMode`, or the `--approval-mode` value. Nothing is saved, so the next start without `--yolo` begins with yolo off. ACP and RPC do not have `/yolo`.
+
 ### Ask and remember (`always-ask-cached`)
 
 Ask and remember prompts like `always-ask`, and also before a tool reads a file it has not been granted. When the call reports the files or folders it touches, the prompt can remember them. Its select menu lists, in this order:

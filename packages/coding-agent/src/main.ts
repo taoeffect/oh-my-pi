@@ -150,6 +150,7 @@ import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
+import { holdYoloApprovalMode } from "./tools/approval";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	getChangelogPath,
@@ -1988,8 +1989,9 @@ export async function runRootCommand(
 			cfgToolsApprovalMode.override(settingsInstance, parsedArgs.approvalMode);
 		} else if (parsedArgs.autoApprove) {
 			// --auto-approve / --yolo without an explicit --approval-mode: reflect in settings so
-			// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
-			cfgToolsApprovalMode.override(settingsInstance, "yolo");
+			// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent. `/yolo`
+			// releases this hold when it turns yolo off.
+			holdYoloApprovalMode(settingsInstance);
 		}
 		// Runtime overrides (not persisted): the session's cost gate reads its thresholds from settings.
 		if (parsedArgs.warnCost !== undefined) cfgSessionWarnCost.override(settingsInstance, parsedArgs.warnCost);

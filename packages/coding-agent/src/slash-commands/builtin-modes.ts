@@ -39,6 +39,7 @@ import {
 	cfgComputerMaxHeight,
 	cfgComputerMaxWidth,
 	cfgRatchetEnabled,
+	cfgToolsApprovalMode,
 } from "../tools/settings";
 import { cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
@@ -198,6 +199,15 @@ function applyComputerUseToggle(session: AgentSession, enable: boolean): string 
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
 		: "Computer use disabled for this session.";
+}
+
+/** Flips `/yolo` (the runtime `--yolo`) and returns the operator feedback. */
+function toggleYoloMode(session: AgentSession): string {
+	const enabled = !session.isAutoApproveEnabled();
+	session.setAutoApprove(enabled);
+	return enabled
+		? "Yolo mode on until omp exits: tool calls are auto-approved; tools.approval policies still apply."
+		: `Yolo mode off: approvals follow tools.approvalMode (${cfgToolsApprovalMode.get(session.settings)}).`;
 }
 
 /** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
@@ -685,6 +695,17 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /computer [on|off|status]");
+			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "yolo",
+		icon: "shield",
+		description: "Toggle yolo mode (auto-approve tool calls, like --yolo) until omp exits",
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isAutoApproveEnabled() ? "Yolo mode: on" : "Yolo mode: off",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showStatus(toggleYoloMode(runtime.ctx.session));
 			clearSubmittedText(runtime);
 		},
 	},

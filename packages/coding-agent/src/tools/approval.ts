@@ -107,6 +107,32 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 	};
 }
 
+/** Runtime `tools.approvalMode` override that a yolo hold replaced, per settings; `undefined` = none. */
+const approvalModeOverrideBeforeYolo = new WeakMap<Settings, ApprovalMode | undefined>();
+
+/**
+ * Holds `tools.approvalMode` at `yolo` with a runtime override (never persisted), as `--yolo` does, so
+ * approval checks that read only settings agree with `autoApprove`. Remembers the runtime override it
+ * replaces for {@link releaseYoloApprovalMode}.
+ */
+export function holdYoloApprovalMode(settings: Settings): void {
+	if (!approvalModeOverrideBeforeYolo.has(settings)) {
+		const replaced =
+			cfgToolsApprovalMode.provenance(settings) === "runtime" ? cfgToolsApprovalMode.get(settings) : undefined;
+		approvalModeOverrideBeforeYolo.set(settings, replaced);
+	}
+	cfgToolsApprovalMode.override(settings, "yolo");
+}
+
+/** Ends {@link holdYoloApprovalMode}: restores the runtime override it replaced, or none. No-op when not held. */
+export function releaseYoloApprovalMode(settings: Settings): void {
+	if (!approvalModeOverrideBeforeYolo.has(settings)) return;
+	const replaced = approvalModeOverrideBeforeYolo.get(settings);
+	approvalModeOverrideBeforeYolo.delete(settings);
+	if (replaced === undefined) cfgToolsApprovalMode.clearOverride(settings);
+	else cfgToolsApprovalMode.override(settings, replaced);
+}
+
 export interface ResolvedApproval {
 	policy: ApprovalPolicy;
 	tier: ToolTier;

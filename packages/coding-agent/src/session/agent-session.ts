@@ -237,7 +237,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
 import type { ImageAttachmentEntry, ToolSession } from "../tools";
-import { resolveApproval } from "../tools/approval";
+import { holdYoloApprovalMode, releaseYoloApprovalMode, resolveApproval } from "../tools/approval";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import {
@@ -11798,6 +11798,22 @@ export class AgentSession implements SettingsScope {
 				);
 			}
 		}
+	}
+
+	/** Whether `--yolo` / `/yolo` auto-approval is on for this run. */
+	isAutoApproveEnabled(): boolean {
+		return this.#tools.autoApprove;
+	}
+
+	/**
+	 * Turns `--yolo` auto-approval on or off until the process exits (never persisted). On also holds
+	 * `tools.approvalMode` at `yolo`, as `--yolo` does; off restores the approval mode it replaced.
+	 */
+	setAutoApprove(enabled: boolean): void {
+		if (enabled === this.#tools.autoApprove) return;
+		this.#tools.autoApprove = enabled;
+		if (enabled) holdYoloApprovalMode(this.settings);
+		else releaseYoloApprovalMode(this.settings);
 	}
 
 	/** Lists thinking levels supported by the active model. */
