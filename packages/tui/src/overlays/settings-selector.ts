@@ -1540,15 +1540,9 @@ export class SettingsSelectorComponent implements Component {
 		return this.#context.settings.get(def.path);
 	}
 
+	/** Structural: hosts may hand out fresh copies of array/record defaults, so identity never matches them. */
 	#isChanged(def: SettingDef, currentValue: unknown): boolean {
-		const defaultValue: unknown = def.defaultValue;
-		if (Array.isArray(currentValue) && Array.isArray(defaultValue)) {
-			return (
-				currentValue.length !== defaultValue.length ||
-				currentValue.some((entry, index) => entry !== defaultValue[index])
-			);
-		}
-		return !Object.is(currentValue, defaultValue);
+		return !Bun.deepEquals(currentValue, def.defaultValue);
 	}
 
 	#getSubmenuCurrentValue(path: string, value: unknown): string {

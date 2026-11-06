@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The settings panel no longer marks record settings (Retry Fallback Chains, Max In-Flight Requests, Tool Approval Policies) as changed while they hold their default value.
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

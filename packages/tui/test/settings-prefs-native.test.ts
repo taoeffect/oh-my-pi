@@ -75,6 +75,12 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		credential: true,
 		ui: { tab: "providers", label: "Tokens", description: "", editor: "json" },
 	},
+	{
+		path: "retry.fallbackChains",
+		type: "record",
+		defaultValue: {},
+		ui: { tab: "model", label: "Fallback chains", description: "" },
+	},
 ];
 
 interface Harness {
@@ -194,6 +200,13 @@ describe("settings as a native prefs page", () => {
 		});
 		expect(row(props, "display.risky").warning).toBe("Can get you flagged");
 		expect(props.focus).toBe("theme.dark");
+	});
+
+	it("compares a record to its default by value, as hosts return fresh copies", () => {
+		const atDefault = prefs(harness({ "retry.fallbackChains": {} }).selector).props;
+		expect(atDefault.pages.find(p => p.id === "model")?.changed).toBeUndefined();
+		const configured = prefs(harness({ "retry.fallbackChains": { web: ["web/exa"] } }).selector).props;
+		expect(configured.pages.find(p => p.id === "model")?.changed).toBe(1);
 	});
 
 	it("puts the status-line preview after its section on Appearance only", () => {
