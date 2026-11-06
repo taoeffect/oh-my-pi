@@ -37,6 +37,7 @@ This repo is a fork. The `mine` branch gets upstream `main` by merge. Each featu
 6. Run `bun check` and the entry's **Check** steps. The merge is not done until they pass, except for known upstream failures (step 8).
 7. If upstream adds more commits that change a listed feature, add those commits and their new symbols to the entry.
 8. Known upstream failures: a `bun check` or test failure that also fails the same way on pristine upstream `main` is upstream debt. Most merges have some. Do not fix it and do not pause for the user. List it as a known upstream failure in the verification notes, and continue. Fix only failures that the merge causes.
+   - Exception: a failure in a job of the fork release workflow (`.github/workflows/release-taoeffect.yml`) stops the release. Fix it during the merge, even when it is upstream debt. First look for upstream's own fix in newer upstream `main` commits, and take it. Write a fork fix only when upstream has none.
 
 ### How to add a feature
 
