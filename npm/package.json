@@ -1,6 +1,6 @@
 {
 	"name": "@taoeffects/omp",
-	"version": "18.16.0-taoeffect.2",
+	"version": "18.16.0-taoeffect.3",
 	"description": "omp coding agent CLI (taoeffect fork of oh-my-pi) as a prebuilt binary",
 	"keywords": [
 		"agent",
