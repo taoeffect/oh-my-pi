@@ -92,6 +92,16 @@ export function approveToolForSession(sessionId: string, toolName: string): void
 	state.similar.delete(toolName);
 }
 
+/**
+ * Tools approved for the rest of the session. This state lives per thread, so
+ * a session homed on a worker publishes this copy to its main-thread mirror,
+ * whose run status reads it (`RemoteAgentSession.isToolApprovedForSession`).
+ */
+export function getApprovedTools(sessionId: string): string[] {
+	const tools = sessionId ? sessionApprovals.get(sessionId)?.approvedTools : undefined;
+	return tools ? [...tools] : [];
+}
+
 /** Record one "approve similar" grant. `identity` must come from {@link approvalIdentity}. */
 export function addSimilarApproval(sessionId: string, toolName: string, subject: string, identity: string): void {
 	const state = mutableState(sessionId);

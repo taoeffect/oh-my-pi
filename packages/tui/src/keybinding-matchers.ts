@@ -1,5 +1,5 @@
 import type { KeyId } from "./app-keybindings";
-import { getKeybindings } from "./keybindings";
+import { getKeybindings, type KeybindingsManager } from "./keybindings";
 import { matchesKey } from "./keys";
 
 /**
@@ -94,10 +94,27 @@ function matchesEffectiveKeys(data: string, keys: readonly KeyId[]): boolean {
  * effective follow-up binding.
  */
 export function matchesAppFollowUp(data: string): boolean {
-	const keybindings = getKeybindings();
+	return matchesEffectiveKeys(data, appFollowUpKeys());
+}
+
+/** Keys follow-up falls back to when unbound, so it stays reachable by keyboard. */
+const UNBOUND_SUBMIT_KEYS: readonly KeyId[] = ["ctrl+enter", "ctrl+q"];
+
+/** Effective follow-up keys: the `app.message.followUp` bindings, or Ctrl+Enter/Ctrl+Q when unbound. */
+export function appFollowUpKeys(keybindings: KeybindingsManager = getKeybindings()): readonly KeyId[] {
 	const keys = keybindings.getKeys("app.message.followUp");
-	if (keys.length > 0) {
-		return matchesEffectiveKeys(data, keys);
-	}
-	return matchesEffectiveKeys(data, ["ctrl+enter", "ctrl+q"]);
+	return keys.length > 0 ? keys : UNBOUND_SUBMIT_KEYS;
+}
+
+/**
+ * Effective /btw inject key (Alt+I by default). No fallback: it sends text into the main
+ * session, so a user who unbinds it gets no key at all.
+ */
+export function appBtwInjectKey(): KeyId | undefined {
+	return getKeybindings().getKeys("app.btw.inject")[0];
+}
+
+/** Match the key that sends a /btw answer's steering prompt to the main session. */
+export function matchesAppBtwInject(data: string): boolean {
+	return getKeybindings().matches(data, "app.btw.inject");
 }

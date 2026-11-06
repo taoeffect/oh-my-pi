@@ -26,7 +26,7 @@ import {
 	clearApprovalGrants,
 	getApprovalGrants,
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
-import { approvalTargetKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
+import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { approveToolForSession } from "@oh-my-pi/pi-coding-agent/tools/session-approvals";
 import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -202,6 +202,26 @@ describe("grant choices in the prompt", () => {
 		return selectApprovalGrant(ui, tool, args, formatApprovalPrompt(tool, args));
 	}
 
+	it.each([
+		[
+			"a directory and a file in another directory",
+			(dir: string) => [approvalDirectoryKey(dir), approvalTargetKey(path.dirname(dir), "a.md")!],
+		],
+		[
+			"a file and a recursive search of its directory",
+			(dir: string) => [approvalTargetKey(dir, "a.md")!, approvalTreeSearchKey(approvalDirectoryKey(dir))],
+		],
+		["a file and an internal URL", (dir: string) => [approvalTargetKey(dir, "a.md")!, "local://a.md"]],
+	])("offers no directory grant for %s, since it would not cover every target", async (_, targets) => {
+		const dir = path.join(freshAgentDir(), "work");
+		fs.mkdirSync(dir);
+		const tool: AgentTool = { ...pathTool("read", "read", dir), approvalCacheTargets: () => targets(dir) };
+		const { ui, prompts } = recordingSelect();
+		await ask(ui, tool, {});
+		// Each call names a target that is not a file, so its one grant is the plain `Approve`.
+		expect(prompts[0]!.options).toEqual(["Approve", "Always Approve", "Approve Once", "Deny"]);
+	});
+
 	it("offers each grant for this conversation, then across sessions, then Approve Once, and lists the folder", async () => {
 		const agentDir = freshAgentDir();
 		const desktop = path.join(agentDir, "Desktop");
@@ -346,6 +366,9 @@ describe("always-ask-cached wrapper cycle", () => {
 				input: async () => undefined,
 				notify: () => {},
 				onTerminalInput: () => () => {},
+				rerenderMessage: () => {},
+				refreshTranscript: () => {},
+				getLinkClicksAvailable: () => false,
 				setStatus: () => {},
 				setWorkingMessage: () => {},
 				setWidget: () => {},

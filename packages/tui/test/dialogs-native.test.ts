@@ -233,14 +233,15 @@ describe("dialogs under a native surface", () => {
 				inputGuard: {
 					isBlocked: () => draft.length > 0,
 					handleInput: key => routed.push(key),
-					hint: "Finish or clear the current prompt to answer",
+					hint: "typing edits your prompt",
 				},
 			},
 		);
 		const line = () => stripVTControlCharacters(dialog.render(200).join("\n"));
 
 		dialog.handleInput("\x1bh");
-		expect(line()).toContain("Finish or clear the current prompt to answer");
+		// A Submit delivered after Hide is stale: it must not hand input to the question.
+		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
 		expect(line()).not.toContain("/⏎ show");
 		dialog.handleInput(ENTER);
 		expect(routed).toEqual([ENTER]);

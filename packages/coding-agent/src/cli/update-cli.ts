@@ -17,12 +17,14 @@ import {
 	compareVersions,
 	formatBytes,
 	getProjectDir,
+	getUpdateStateDir,
 	isCompiledBinary,
 	isEnoent,
 	VERSION,
+	WhichCachePolicy,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
 import { Settings, settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -97,6 +99,18 @@ const SUPPORTED_NATIVE_TAGS: ReadonlySet<string> = new Set([
 function currentNativeTag(): string {
 	return `${process.platform}-${process.arch}`;
 }
+
+/**
+ * Live progress of an install, for callers that display it (the auto-update
+ * banner). `installing` covers the binary swap and package-manager runs, which
+ * report no byte count.
+ */
+export type UpdateProgress =
+	| { phase: "downloading"; version: string; received: number; total: number }
+	| { phase: "installing"; version: string };
+
+/** Receives {@link UpdateProgress} while an update installs. */
+export type UpdateProgressListener = (progress: UpdateProgress) => void;
 
 /** Distribution channel advertised by a release's published npm manifest. */
 export type ReleaseDist = "npm" | "binary";
@@ -208,6 +222,8 @@ export interface VerifiedBinaryDownloadOptions {
 	expectedSize: number;
 	expectedDigest: string;
 	fetchImpl?: Fetch;
+	/** Bytes received so far, after each chunk. */
+	onProgress?: (received: number) => void;
 }
 
 /**
@@ -250,6 +266,7 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 				return;
 			}
 			hash.update(chunk);
+			options.onProgress?.(size);
 			callback(null, chunk);
 		},
 	});
@@ -422,6 +439,20 @@ export async function managedInstallName(binaryPath: string): Promise<string | u
 	if (!isRecord(manifest)) return undefined;
 	const name = typeof manifest.name === "string" && manifest.name ? manifest.name : manifest.manager;
 	return typeof name === "string" && name ? name : undefined;
+}
+
+/**
+ * Whether the running omp may install its own updates: not a source checkout
+ * (git updates it), not kept by a managing app (Tern updates its omp itself),
+ * not in the Nix store, and not a fork release build (it only shows the update
+ * notice; the user runs `omp update`). Judged from the running build alone,
+ * without the package-manager probes `omp update` runs.
+ */
+export async function canSelfUpdate(): Promise<boolean> {
+	if (isForkReleaseBuild(VERSION)) return false;
+	if (isSourceCheckout()) return false;
+	if (isPathInDirectory(isCompiledBinary() ? process.execPath : import.meta.dir, NIX_STORE_DIR)) return false;
+	return (await managedInstallName(process.execPath)) === undefined;
 }
 
 function isSymlinkPath(p: string): boolean {
@@ -1219,8 +1250,10 @@ async function validateExistingUpdateTarget(targetPath: string): Promise<void> {
 /**
  * Run the PATH-resolved omp binary and check if it reports the expected version.
  */
-async function verifyInstalledVersion(expectedVersion: string): Promise<InstalledVersionVerification> {
-	const ompPath = resolveOmpPath();
+export async function verifyInstalledVersion(expectedVersion: string): Promise<InstalledVersionVerification> {
+	// A fresh lookup: the install may have moved what PATH resolves to (a Windows
+	// shim takeover retires `omp.cmd` for `omp.exe`) since the target was resolved.
+	const ompPath = $which(APP_NAME, { cache: WhichCachePolicy.Fresh }) ?? undefined;
 	if (!ompPath) return { ok: false };
 	const binaryPath = tryRealpath(ompPath) ?? ompPath;
 	return await verifyBinaryAtPath(binaryPath, expectedVersion);
@@ -1751,7 +1784,11 @@ export interface ManagerUpdateSteps {
  * Production {@link ManagerUpdateSteps}: a bun/npm global install plus an
  * in-place takeover with the build service's build of the same version.
  */
-function packageManagerUpdateSteps(manager: "bun" | "npm", release: ReleaseInfo): ManagerUpdateSteps {
+function packageManagerUpdateSteps(
+	manager: "bun" | "npm",
+	release: ReleaseInfo,
+	onProgress?: UpdateProgressListener,
+): ManagerUpdateSteps {
 	return {
 		manager,
 		install: () => (manager === "bun" ? updateViaBun(release) : updateViaNpm(release)),
@@ -1763,9 +1800,9 @@ function packageManagerUpdateSteps(manager: "bun" | "npm", release: ReleaseInfo)
 			// npm's script shims outrank `.exe` in PowerShell and Git Bash, so
 			// they must be retired rather than merely shadowed.
 			if (isWindowsScriptLauncherPath(launcherPath)) {
-				await updateViaShimTakeover(launcherPath, build);
+				await updateViaShimTakeover(launcherPath, build, { onProgress });
 			} else {
-				await updateViaBinaryAt(launcherPath, build);
+				await updateViaBinaryAt(launcherPath, build, { onProgress });
 			}
 		},
 	};
@@ -1884,10 +1921,11 @@ let updateAttemptSeq = 0;
  */
 export type BinaryPatchApplier = (oldPath: string, patchPath: string, outPath: string) => Promise<number>;
 
-/** Network and patching seams for installing a {@link BuildAnswer}. */
+/** Network and patching seams for installing a {@link BuildAnswer}, plus its progress listener. */
 export interface BuildDownloadOptions {
 	fetchImpl?: Fetch;
 	applyPatch?: BinaryPatchApplier;
+	onProgress?: UpdateProgressListener;
 }
 
 /** Size and lowercase hex SHA-256 of a file, streamed. */
@@ -1930,6 +1968,8 @@ async function installFromPatch(
 			expectedSize: patch.size,
 			expectedDigest: `sha256:${patch.sha256}`,
 			fetchImpl: options.fetchImpl,
+			onProgress: received =>
+				options.onProgress?.({ phase: "downloading", version: build.version, received, total: patch.size }),
 		});
 		await (options.applyPatch ?? applyBinaryPatch)(paths.basePath, paths.patchPath, paths.tempPath);
 		const result = await fileDigest(paths.tempPath);
@@ -1974,6 +2014,8 @@ async function downloadBuild(
 		expectedSize: build.file.size,
 		expectedDigest: `sha256:${build.file.sha256}`,
 		fetchImpl: options.fetchImpl,
+		onProgress: received =>
+			options.onProgress?.({ phase: "downloading", version: build.version, received, total: build.file.size }),
 	});
 	console.log(chalk.dim(`Verified sha256:${build.file.sha256}`));
 }
@@ -2005,6 +2047,7 @@ export async function updateViaBinaryAt(
 	const tempPath = `${targetPath}.${attempt}.new`;
 	const backupPath = `${targetPath}.${attempt}.bak`;
 	await downloadBuild(build, { basePath: targetPath, patchPath: `${targetPath}.${attempt}.patch`, tempPath }, options);
+	options.onProgress?.({ phase: "installing", version: build.version });
 
 	// Serialize the target swap and stale-artifact sweep per target so two
 	// overlapping `omp update` runs never replace the same binary concurrently
@@ -2076,6 +2119,7 @@ export async function updateViaShimTakeover(
 	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
 	const tempPath = `${exePath}.${attempt}.new`;
 	await downloadBuild(build, { basePath: exePath, patchPath: `${exePath}.${attempt}.patch`, tempPath }, options);
+	options.onProgress?.({ phase: "installing", version: build.version });
 	const forwarded: Array<{ launcher: string; original: string }> = [];
 	const stuck: string[] = [];
 	// Serialize the launcher swap and artifact sweep so two overlapping updates
@@ -2187,15 +2231,16 @@ function persistChannel(channel: UpdateChannel): void {
 /**
  * Update a fork release build from {@link FORK_PACKAGE}. Only an omp started by
  * that package's launcher runs npm; any other install (for example a binary
- * downloaded by hand) gets the commands to run instead.
+ * downloaded by hand) gets the commands to run instead, and is `unsupported`.
  */
-async function updateForkRelease(release: ReleaseInfo): Promise<void> {
+async function updateForkRelease(release: ReleaseInfo): Promise<UpdateOutcome> {
 	const args = ["install", "-g", `--registry=${release.registry}`, `${release.packages.pkg}@${release.version}`];
 	if ($env[FORK_NPM_WRAPPER_ENV] !== String(process.ppid)) {
-		console.log(chalk.yellow(`This ${APP_NAME} was not started by the ${FORK_PACKAGE} npm launcher.`));
+		const reason = `This ${APP_NAME} was not started by the ${FORK_PACKAGE} npm launcher.`;
+		console.log(chalk.yellow(reason));
 		console.log(`Install the update with: npm ${args.join(" ")}`);
 		console.log(`Or download it from: https://github.com/${FORK_REPO}/releases/tag/${release.tag}`);
-		return;
+		return { kind: "unsupported", reason };
 	}
 	console.log(chalk.dim("Updating via npm..."));
 	const result = await $`npm ${args}`.nothrow();
@@ -2208,6 +2253,7 @@ async function updateForkRelease(release: ReleaseInfo): Promise<void> {
 	} else {
 		console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(verification, release.version)}`));
 	}
+	return { kind: "installed", version: release.version };
 }
 
 type BinaryUpdateTarget = Extract<UpdateTarget, { method: "binary" }>;
@@ -2224,6 +2270,47 @@ interface UpdateRequest {
 	persistChannel: boolean;
 	/** Version of the running build, which offered versions are compared against. */
 	currentVersion: string;
+	onProgress?: UpdateProgressListener;
+}
+
+/** Options for {@link runUpdateCommand}: the `omp update` flags, plus a progress listener for background runs. */
+export interface UpdateOptions {
+	force: boolean;
+	check: boolean;
+	/** Switch to and persist this channel; unset keeps `update.channel`. */
+	channel?: UpdateChannel;
+	onProgress?: UpdateProgressListener;
+	/** Version of the running build; defaults to {@link VERSION}. */
+	currentVersion?: string;
+}
+
+/** How {@link runUpdateCommand} ended without an error. */
+export type UpdateOutcome =
+	/** Nothing newer to install. */
+	| { kind: "current" }
+	/** `--check` found `version`; nothing was installed. */
+	| { kind: "available"; version: string }
+	/** This install cannot update itself (a managing app, Nix, a channel its installer lacks). */
+	| { kind: "unsupported"; reason: string }
+	/** The installer ran for `version`; whether the launcher now reports it was printed, not checked. */
+	| { kind: "installed"; version: string };
+
+/** `<what>: <reason>`, keeping `err` as the cause. */
+function updateError(what: string, err: unknown): Error {
+	return new Error(`${what}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+}
+
+/**
+ * Lock held while an update installs, so `omp update` and the background
+ * auto-update never run two installers (two `bun install -g`, or a package
+ * manager racing a binary swap) against the same install.
+ */
+function acquireInstallLock(): FileLockHandle {
+	const dir = getUpdateStateDir();
+	fs.mkdirSync(dir, { recursive: true });
+	const lock = tryAcquireFileLock(path.join(dir, "install"));
+	if (!lock) throw new Error(`Another ${APP_NAME} update is already running; try again once it finishes.`);
+	return lock;
 }
 
 /**
@@ -2261,25 +2348,28 @@ async function runBinaryUpdate(
 	target: BinaryUpdateTarget | undefined,
 	targetError: unknown,
 	request: UpdateRequest,
-): Promise<void> {
+): Promise<UpdateOutcome> {
 	let build: BuildAnswer;
 	try {
 		const fromVersion = target ? await installedBuildVersion(target.path) : VERSION;
 		build = await fetchBuild({ channel: request.channel }, { fromVersion });
 	} catch (err) {
-		console.error(chalk.red(`Failed to check for updates: ${err}`));
-		process.exit(1);
+		throw updateError("Failed to check for updates", err);
 	}
-	if (!announceOffer(build.version, request) || request.check) return;
+	if (!announceOffer(build.version, request)) return { kind: "current" };
+	if (request.check) return { kind: "available", version: build.version };
 
 	try {
 		if (!target) throw targetError;
-		await updateViaBinaryAt(target.path, build, { validateExistingTarget: target.validateExistingTarget });
+		await updateViaBinaryAt(target.path, build, {
+			validateExistingTarget: target.validateExistingTarget,
+			onProgress: request.onProgress,
+		});
 		if (request.persistChannel) persistChannel(request.channel);
 	} catch (err) {
-		console.error(chalk.red(`Update failed: ${err}`));
-		process.exit(1);
+		throw updateError("Update failed", err);
 	}
+	return { kind: "installed", version: build.version };
 }
 
 /**
@@ -2297,7 +2387,8 @@ async function updateToStandaloneBinary(
 	manager: "bun" | "npm",
 	release: ReleaseInfo,
 	channel: UpdateChannel,
-): Promise<void> {
+	onProgress?: UpdateProgressListener,
+): Promise<string> {
 	const target = await resolveUpdateTarget({ allowPackageManagers: false });
 	const fromVersion = target.method === "binary" ? await installedBuildVersion(target.path) : VERSION;
 	const build = await fetchBuild({ channel }, { fromVersion });
@@ -2314,16 +2405,20 @@ async function updateToStandaloneBinary(
 		if (target.replacesSymlink) {
 			console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
 		}
-		await updateViaBinaryAt(target.path, build, { validateExistingTarget: target.validateExistingTarget });
+		await updateViaBinaryAt(target.path, build, {
+			validateExistingTarget: target.validateExistingTarget,
+			onProgress,
+		});
 		if (target.replacesSymlink) console.log(chalk.yellow(unmanaged));
-		return;
+		return build.version;
 	}
 	// Without package-manager routing only a Windows script launcher resolves
 	// to a manager (the bun/npm bin-dir probes are skipped), so its path is known.
 	if (target.method !== "npm" || !target.path) throw new Error(`Could not resolve ${APP_NAME} launcher path in PATH`);
 	console.log(chalk.dim("This release ships as a standalone binary; replacing the script launcher."));
-	await updateViaShimTakeover(target.path, build);
+	await updateViaShimTakeover(target.path, build, { onProgress });
 	console.log(chalk.yellow(unmanaged));
+	return build.version;
 }
 
 /**
@@ -2334,48 +2429,58 @@ async function runManagedUpdate(
 	target: ManagedUpdateTarget | undefined,
 	targetError: unknown,
 	request: UpdateRequest,
-): Promise<void> {
+): Promise<UpdateOutcome> {
 	let release: ReleaseInfo;
 	try {
 		release = await getLatestRelease({ channel: request.channel });
 	} catch (err) {
-		console.error(chalk.red(`Failed to check for updates: ${err}`));
-		process.exit(1);
+		throw updateError("Failed to check for updates", err);
 	}
-	if (!announceOffer(release.version, request)) return;
+	if (!announceOffer(release.version, request)) return { kind: "current" };
 	if (release.packages.pkg !== PACKAGE) {
 		console.log(chalk.cyan(`The npm package moved to ${release.packages.pkg}; updating migrates this install.`));
 	}
-	if (request.check) return;
+	if (request.check) return { kind: "available", version: release.version };
 
+	let installed = release.version;
 	try {
 		if (!target) throw targetError;
 		if (
 			request.channel === "canary" &&
 			(target.method === "nix" || target.method === "brew" || target.method === "mise")
 		) {
-			console.log(chalk.yellow("Canary updates are only supported for bun, npm, or binary installs."));
-			return;
+			const reason = "Canary updates are only supported for bun, npm, or binary installs.";
+			console.log(chalk.yellow(reason));
+			return { kind: "unsupported", reason };
 		}
 		if (target.method === "nix") {
-			console.log(chalk.yellow("This installation is managed by Nix and cannot update itself."));
+			const reason = "This installation is managed by Nix and cannot update itself.";
+			console.log(chalk.yellow(reason));
 			console.log(chalk.dim("Update the flake input or profile that provides omp, then rebuild."));
-			return;
+			return { kind: "unsupported", reason };
 		}
+		const installing = (): void => request.onProgress?.({ phase: "installing", version: release.version });
 		if (target.method === "brew") {
+			installing();
 			await updateViaHomebrew(release.version, request.force);
 		} else if (target.method === "mise") {
+			installing();
 			await updateViaMise(release.version, request.force);
 		} else if (shouldForceBinaryUpdate(release)) {
-			await updateToStandaloneBinary(target.method, release, request.channel);
+			installed = await updateToStandaloneBinary(target.method, release, request.channel, request.onProgress);
 		} else {
-			await updateViaManager(release, target.path, packageManagerUpdateSteps(target.method, release));
+			installing();
+			await updateViaManager(
+				release,
+				target.path,
+				packageManagerUpdateSteps(target.method, release, request.onProgress),
+			);
 		}
 		if (request.persistChannel) persistChannel(request.channel);
 	} catch (err) {
-		console.error(chalk.red(`Update failed: ${err}`));
-		process.exit(1);
+		throw updateError("Update failed", err);
 	}
+	return { kind: "installed", version: installed };
 }
 
 /**
@@ -2383,13 +2488,12 @@ async function runManagedUpdate(
  * report an upstream release that has gone beyond the fork, which it cannot
  * install. The fork has one channel, so the persisted channel is never changed.
  */
-async function runForkUpdate(request: UpdateRequest): Promise<void> {
+async function runForkUpdate(request: UpdateRequest): Promise<UpdateOutcome> {
 	let check: ForkReleaseCheck;
 	try {
 		check = await checkForkReleases(request.currentVersion);
 	} catch (err) {
-		console.error(chalk.red(`Failed to check for updates: ${err}`));
-		process.exit(1);
+		throw updateError("Failed to check for updates", err);
 	}
 	const install = announceOffer(check.release.version, request);
 	if (check.upstreamAhead) {
@@ -2401,13 +2505,13 @@ async function runForkUpdate(request: UpdateRequest): Promise<void> {
 	} else if (check.upstreamError) {
 		console.log(chalk.dim(`Could not check upstream OMP releases: ${check.upstreamError}`));
 	}
-	if (!install || request.check) return;
+	if (!install) return { kind: "current" };
+	if (request.check) return { kind: "available", version: check.release.version };
 
 	try {
-		await updateForkRelease(check.release);
+		return await updateForkRelease(check.release);
 	} catch (err) {
-		console.error(chalk.red(`Update failed: ${err}`));
-		process.exit(1);
+		throw updateError("Update failed", err);
 	}
 }
 
@@ -2419,31 +2523,24 @@ async function runForkUpdate(request: UpdateRequest): Promise<void> {
  * asks npm. When no target resolves, the running build's kind decides, so
  * `--check` still answers; installing then fails on the unresolved target.
  * A fork release build always updates from {@link FORK_PACKAGE}.
+ *
+ * Progress and results print to stdout. Throws when the check or the install
+ * fails, or when another update holds the install lock.
  */
-export async function runUpdateCommand(opts: {
-	force: boolean;
-	check: boolean;
-	channel?: UpdateChannel;
-	/** Version of the running build; defaults to {@link VERSION}. */
-	currentVersion?: string;
-}): Promise<void> {
+export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
 	const ompPath = resolveOmpPath();
 	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
 	if (manager) {
-		console.log(
-			chalk.yellow(`${ompPath} is installed and kept up to date by ${manager}; update it from ${manager}.`),
-		);
-		return;
+		const reason = `${ompPath} is installed and kept up to date by ${manager}; update it from ${manager}.`;
+		console.log(chalk.yellow(reason));
+		return { kind: "unsupported", reason };
 	}
 	// `update.channel` picks the channel; --canary/--stable switch and persist it.
 	await Settings.init({ cwd: getProjectDir() });
 	const currentVersion = opts.currentVersion ?? VERSION;
 	const forkBuild = isForkReleaseBuild(currentVersion);
 	console.log(chalk.dim(`Current version: ${currentVersion}`));
-	if (forkBuild && opts.channel === "canary") {
-		console.error(chalk.red(`${FORK_PACKAGE} has no canary channel.`));
-		process.exit(1);
-	}
+	if (forkBuild && opts.channel === "canary") throw new Error(`${FORK_PACKAGE} has no canary channel.`);
 	// A canary channel persisted by an upstream install does not apply to the fork.
 	const persistedChannel = forkBuild ? "stable" : (readPersistedChannel() ?? "stable");
 	const channel = opts.channel ?? persistedChannel;
@@ -2455,26 +2552,26 @@ export async function runUpdateCommand(opts: {
 		isChannelSwitch: opts.channel !== undefined && opts.channel !== persistedChannel,
 		persistChannel: opts.channel !== undefined,
 		currentVersion,
+		onProgress: opts.onProgress,
 	};
-	// Before target resolution: a fork binary would otherwise update from the upstream build service.
-	if (forkBuild) {
-		await runForkUpdate(request);
-		return;
-	}
 
-	let target: UpdateTarget | undefined;
-	let targetError: unknown;
+	const lock = opts.check ? undefined : acquireInstallLock();
 	try {
-		target = await resolveUpdateTarget({ allowPackageManagers: true });
-	} catch (err) {
-		targetError = err;
-	}
-	if (target?.method === "binary") {
-		await runBinaryUpdate(target, targetError, request);
-	} else if (!target && isCompiledBinary()) {
-		await runBinaryUpdate(undefined, targetError, request);
-	} else {
-		await runManagedUpdate(target, targetError, request);
+		// Before target resolution: a fork binary would otherwise update from the upstream build service.
+		if (forkBuild) return await runForkUpdate(request);
+
+		let target: UpdateTarget | undefined;
+		let targetError: unknown;
+		try {
+			target = await resolveUpdateTarget({ allowPackageManagers: true });
+		} catch (err) {
+			targetError = err;
+		}
+		if (target?.method === "binary") return await runBinaryUpdate(target, targetError, request);
+		if (!target && isCompiledBinary()) return await runBinaryUpdate(undefined, targetError, request);
+		return await runManagedUpdate(target, targetError, request);
+	} finally {
+		lock?.release();
 	}
 }
 

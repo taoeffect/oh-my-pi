@@ -8,18 +8,18 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 ### Package Structure
 
-| Package                 | Description                                                                             |
-| ----------------------- | --------------------------------------------------------------------------------------- |
-| `packages/ai`           | Multi-provider LLM client with streaming support                                        |
-| `packages/catalog`      | Model catalog: bundled models.json, provider descriptors, model identity/classification |
-| `packages/agent`        | Agent runtime with tool calling and state management                                    |
-| `packages/coding-agent` | Main CLI application (primary focus)                                                    |
-| `packages/tui`          | Terminal UI library with differential rendering                                         |
-| `packages/natives`      | Bindings for native text/image/grep operations                                          |
-| `packages/stats`        | Local observability dashboard (`omp stats`)                                             |
-| `packages/omptype`      | ArkType-compatible schema validation with a lazy JIT runtime                            |
-| `packages/utils`        | Shared utilities (logger, streams, temp files)                                          |
-| `crates/pi-natives`     | Rust crate for performance-critical text/grep ops                                       |
+|Package|Description|
+|---|---|
+|`packages/ai`|Multi-provider LLM client with streaming support|
+|`packages/catalog`|Model catalog: bundled models.json, provider descriptors, model identity/classification|
+|`packages/agent`|Agent runtime with tool calling and state management|
+|`packages/coding-agent`|Main CLI application (primary focus)|
+|`packages/tui`|Terminal UI library with differential rendering|
+|`packages/natives`|Bindings for native text/image/grep operations|
+|`packages/stats`|Local observability dashboard (`omp stats`)|
+|`packages/omptype`|ArkType-compatible schema validation with a lazy JIT runtime|
+|`packages/utils`|Shared utilities (logger, streams, temp files)|
+|`crates/pi-natives`|Rust crate for performance-critical text/grep ops|
 
 **Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
 
@@ -34,8 +34,9 @@ This repo is a fork. The `mine` branch gets upstream `main` by merge. Each featu
 3. Check the files that merged with no conflict too. Upstream can replace a feature with no conflict markers, for example by changing an import. Search `packages/` and `docs/` for the entry's **Markers**. Any match means the rejected upstream change got in.
 4. Remove the rejected upstream change from every file, not only from the conflict blocks. Reverse its commits file by file, newest first: `git show --format= <commit> -- <file> | git apply -R --3way`. If upstream changed a file only in those commits, restore that file from the fork side (`git checkout HEAD -- <file>`). Keep all other upstream changes in the same files.
 5. Remove the rejected change's changelog entries, docs, keybindings, and tests.
-6. Run `bun check` and the entry's **Check** steps. The merge is not done until they pass.
+6. Run `bun check` and the entry's **Check** steps. The merge is not done until they pass, except for known upstream failures (step 8).
 7. If upstream adds more commits that change a listed feature, add those commits and their new symbols to the entry.
+8. Known upstream failures: a `bun check` or test failure that also fails the same way on pristine upstream `main` is upstream debt. Most merges have some. Do not fix it and do not pause for the user. List it as a known upstream failure in the verification notes, and continue. Fix only failures that the merge causes.
 
 ### How to add a feature
 
@@ -55,7 +56,8 @@ Add one `###` subsection per feature below this one. Use these fields:
   - `packages/coding-agent/src/tools/session-approvals.ts`, `approval-similarity.ts`, `approval-write-targets.ts`.
   - `packages/coding-agent/src/tools/approval.ts`: `formatApprovalPrompt`, `truncateForPrompt`, `isTruncatedForPrompt`. Keep upstream's `formatApprovalArguments` (PR [#16048](https://github.com/can1357/oh-my-pi/pull/16048)): `formatApprovalPrompt` uses it for `mcp__` tools without their own details, and `MCPTool`, `DeferredMCPTool`, and `WriteTool` (`xd://` paths) use it in `formatApprovalDetails`.
   - `packages/coding-agent/src/tools/approval.ts` (Ask and remember): `offersApprovalGrants` (the one condition for a grant prompt), `selectApprovalGrant` (the grant menu through `ui.select`, with the full folder listing), and `recordApprovalGrant`.
-  - `packages/coding-agent/src/modes/controllers/event-controller.ts`: `#blockingPrompt` adds `!offersApprovalGrants(...)` to `sessionGrantMayAnswer`, so the run status never reads "approved" for a grant prompt that the wrapper still shows. When a similar or file session grant may answer the call (`hasSessionApprovalGrants`), `#blockingPrompt` sets `untilMenuOpens`, and the controller keeps the `blocked` status in `#heldBlockingPrompts` until the wrapper calls the approval preview waiter right before the menu. So a call that "Approve Similar" covers never reads blocked and never rings a bell.
+  - `packages/coding-agent/src/modes/controllers/event-controller.ts`: `#blockingPrompt` reads the viewed session (`this.ctx.viewSession`) and skips the `blocked` status when `AgentViewSession.isToolApprovedForSession(toolName)` is true. It adds `!offersApprovalGrants(...)` to `sessionGrantMayAnswer`, so the run status never reads "approved" for a grant prompt that the wrapper still shows. When a similar or file session grant may answer the call (`hasSessionApprovalGrants`) and the viewed session is the main session (`session === this.ctx.session`), `#blockingPrompt` sets `untilMenuOpens`, and the controller keeps the `blocked` status in `#heldBlockingPrompts` until the wrapper calls the approval preview waiter right before the menu. So a call that "Approve Similar" covers never reads blocked and never rings a bell. Only the main session's runner calls that waiter, so a hold for another session would never end.
+  - Fork session approvals for worker-thread subagents: `getApprovedTools` (`tools/session-approvals.ts`), `AgentSession.isToolApprovedForSession`, the mirror field `SessionApprovals.approvedTools` (`thread/session-mirror.ts`, published by `thread/session-publisher.ts`), and `RemoteAgentSession.isToolApprovedForSession` (`thread/remote-agent-session.ts`). Only approved tool names are mirrored, not similar or file grants. Keep upstream's `approvals.grants` (`sessionApprovalGrantKeys`).
   - `packages/coding-agent/src/session/session-tools.ts`: in the ACP permission gate, `finishSteer` ends the dialog when a user steer arrives. It does not reorder the steering queue.
   - `packages/coding-agent/src/eval/preludes.ts`: `approvePreludeInvocation` calls `ui.select(formatApprovalPrompt(...), ["Approve", "Deny"])`.
   - `labelHighlight` on `ExtensionUISelectOption` (`extensions/types.ts`) and `HookSelectorOption` (`packages/tui/src/overlays/hook-selector.ts`).
@@ -67,9 +69,11 @@ Add one `###` subsection per feature below this one. Use these fields:
   - PR [#15642](https://github.com/can1357/oh-my-pi/pull/15642) (merge `b91db66e9b`, upstream 18.11.0), commit `1b727a9fcc` (upstream 18.11.3), and the approval part of commit `a89329f303` (`approvalOwnsComposer`, `Agent.prioritizeSteering`, `#denyingSteering`). They keep the dialog and add typing in the composer to deny and steer, a one-row detail summary that `Ctrl+O` expands, and upstream's own `Approve <subject> for this session` choice. That grant is stored in `ExtensionRunner` (`hasSessionApproval`, `grantSessionApproval`), keyed on subject and tier, and `ui.approve()` answers `once`, `session`, or `deny`.
   - PR [#16049](https://github.com/can1357/oh-my-pi/pull/16049) (merge `61bc6d217e`, upstream 18.12.3), the dialog and `ui.approve()` parts of commits `cb37f6cf35` and `0365af7610`. They show the Ask and remember grants in `ApprovalDialogComponent` with a "Remember across sessions" toggle, answer through `requestApproval` and `ui.approve()` (`ExtensionApprovalGrant`), use a compact folder listing (`APPROVAL_FOLDER_COMPACT_LISTING`), and fall back to a select menu with upstream labels (`approvalChoiceLabels`, `approvalAnswerForChoice`, `approvalOnceLabel`). Keep the rest of the PR: the `always-ask-cached` mode, `approvalCacheTargets`, the grant store (`approval-cache.ts`), and the folder listing.
   - PR [#15885](https://github.com/can1357/oh-my-pi/pull/15885) (merge `cb580b12e3`, upstream 18.12.6), the steer promotion only, from commits `68f6a973c3`, `e428f03453`, `0b810cc28b`, `55c1943db5`, and `9a4a530039`. The ACP permission gate calls `agent.prioritizeSteering` to move the steer that ended a dialog ahead of older queued steers. Keep the rest of the ACP steering gate (`steeringArrivalSeq`, `steeringArrivalAdmitted`, `steeringArrivalRelease`, park snapshots).
-- **Markers**: `requestApproval|ApprovalDialogComponent|approval-dialog|ExtensionApprovalPrompt|showCollabAwareApproval|truncateApprovalDetail|ApprovalDetailsOptions|compactApprovalDetail|matchesAppApprove|appApproveKeys|app\.approval\.approve|ui\.approve|sessionApprovalScope|\bhasSessionApproval\b|grantSessionApproval|ExtensionApprovalAnswer|APPROVE_ARM_MS|approvalOwnsComposer|prioritizeSteering|appToolsExpandKey|denyingSteering|approvalSummary|ExtensionApprovalGrant|Remember across sessions|approvalChoiceLabels|approvalAnswerForChoice|approvalOnceLabel|APPROVAL_FOLDER_COMPACT_LISTING`
+  - PR [#17961](https://github.com/can1357/oh-my-pi/pull/17961) (merge `84c92fbbf4`, upstream after 18.16.0), the approve-key parts of commits `ac3305bb7e` and `da60224c23`. `getShortcutConflict` reports Ctrl+Enter as held by `app.approval.approve` when its binding is emptied (`appApproveKeys(keymap)`), and `docs/extensions.md` says Ctrl+Enter counts for approve and follow-up. Keep the rest of the PR: `getShortcutConflict` with the follow-up fallback (`appFollowUpKeys`), canonical shortcut keys, and `unwrapHashlineHeaderPath`.
+  - Commit `d14c75a528` (upstream after 18.16.0), the approval-scope mirror only. `ExtensionRunner.sessionApprovalKeys` publishes upstream's session approval keys as `SessionViewState.approvals.scopes`, and `#blockingPrompt` reads them through `hasSessionApproval` on `AgentViewSession`, `AgentSession`, and `RemoteAgentSession`. Keep the rest of the commit: worker-thread subagents, the session mirror, `approvals.grants`, and `#blockingPrompt` reading the viewed session.
+- **Markers**: `requestApproval|ApprovalDialogComponent|approval-dialog|ExtensionApprovalPrompt|showCollabAwareApproval|truncateApprovalDetail|ApprovalDetailsOptions|compactApprovalDetail|matchesAppApprove|appApproveKeys|app\.approval\.approve|ui\.approve|sessionApprovalScope|\bhasSessionApproval\b|grantSessionApproval|ExtensionApprovalAnswer|APPROVE_ARM_MS|approvalOwnsComposer|prioritizeSteering|appToolsExpandKey|denyingSteering|approvalSummary|ExtensionApprovalGrant|Remember across sessions|approvalChoiceLabels|approvalAnswerForChoice|approvalOnceLabel|APPROVAL_FOLDER_COMPACT_LISTING|sessionApprovalKeys|approve (and|or) follow-up`
 - **Check**:
-  - `bun test` in `packages/coding-agent` for `test/extensions-runner.test.ts`, `test/acp-agent.test.ts`, `test/tools/approval.test.ts`, `test/modes/controllers/event-controller-approval-title.test.ts`, `test/tools/approval-cached-mode.test.ts`, `test/tools/approval-restricted-folders.test.ts`, and `test/agent-session-acp-permission.test.ts`, and in `packages/tui` for `test/hook-selector-overflow.test.ts`.
+  - `bun test` in `packages/coding-agent` for `test/extensions-runner.test.ts`, `test/acp-agent.test.ts`, `test/tools/approval.test.ts`, `test/modes/controllers/event-controller-approval-title.test.ts`, `test/modes/controllers/event-controller-run-status.test.ts`, `test/thread/focus-view.test.ts`, `test/extension-shortcuts.test.ts`, `test/tools/approval-cached-mode.test.ts`, `test/tools/approval-restricted-folders.test.ts`, and `test/agent-session-acp-permission.test.ts`, and in `packages/tui` for `test/hook-selector-overflow.test.ts`.
   - Run `omp` with `tools.approvalMode: always-ask` and ask for a `bash` call. The menu MUST show the 4 options, and `Enter` on an option MUST answer it.
   - Run `omp` with `tools.approvalMode: always-ask-cached` and ask for a `read` of a file. The menu MUST show the Ask and remember options with the folder listing and no session options. After `Approve File`, a second `read` of the same file MUST NOT prompt.
 
@@ -110,20 +114,20 @@ Use Bun APIs where they provide a cleaner alternative; fall back to `node:*` onl
 
 ### Quick reference
 
-| Operation       | Use                                       | Not                                |
-| --------------- | ----------------------------------------- | ---------------------------------- |
-| File read/write | `Bun.file()`, `Bun.write()`               | `readFileSync`, `writeFileSync`    |
-| Spawn process   | `` $`cmd` ``, `Bun.spawn()`               | `child_process`                    |
-| Sleep           | `Bun.sleep(ms)`                           | `setTimeout` promise               |
-| Binary lookup   | `$which("git")` from `@oh-my-pi/pi-utils` | `spawnSync(["which", "git"])`      |
-| HTTP server     | `Bun.serve()`                             | `http.createServer()`              |
-| SQLite          | `bun:sqlite`                              | `better-sqlite3`                   |
-| Hashing         | `Bun.hash()`, `Bun.password.*`, WebCrypto | `node:crypto`                      |
-| Path resolution | `import.meta.dir`, `import.meta.path`     | `fileURLToPath` dance              |
-| JSON5           | `Bun.JSON5.parse()` / `.stringify()`      | `json5` package                    |
-| JSONL           | `Bun.JSONL.parse()` / `.parseChunk()`     | `text.split("\n").map(JSON.parse)` |
-| String width    | `Bun.stringWidth()`                       | `get-east-asian-width`, custom     |
-| Text wrapping   | `Bun.wrapAnsi()`                          | custom ANSI-aware wrappers         |
+|Operation|Use|Not|
+|---|---|---|
+|File read/write|`Bun.file()`, `Bun.write()`|`readFileSync`, `writeFileSync`|
+|Spawn process|`` $`cmd` ``, `Bun.spawn()`|`child_process`|
+|Sleep|`Bun.sleep(ms)`|`setTimeout` promise|
+|Binary lookup|`$which("git")` from `@oh-my-pi/pi-utils`|`spawnSync(["which", "git"])`|
+|HTTP server|`Bun.serve()`|`http.createServer()`|
+|SQLite|`bun:sqlite`|`better-sqlite3`|
+|Hashing|`Bun.hash()`, `Bun.password.*`, WebCrypto|`node:crypto`|
+|Path resolution|`import.meta.dir`, `import.meta.path`|`fileURLToPath` dance|
+|JSON5|`Bun.JSON5.parse()` / `.stringify()`|`json5` package|
+|JSONL|`Bun.JSONL.parse()` / `.parseChunk()`|`text.split("\n").map(JSON.parse)`|
+|String width|`Bun.stringWidth()`|`get-east-asian-width`, custom|
+|Text wrapping|`Bun.wrapAnsi()`|custom ANSI-aware wrappers|
 
 ### Process execution
 
@@ -295,18 +299,19 @@ For the bash tool specifically:
 - NEVER commit unless asked.
 - Never use `tsc`/`npx tsc` — always `bun check`.
 - Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass runs every runnable doctest in the workspace's lib crates; today that is tree-sitter-go's one example (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs).
+- `bun check`'s Rust half runs only when the branch changed a Rust-affecting file (`*.rs`, `crates/`, Cargo/toolchain files) since its merge base with `upstream/main` or `origin/main`, committed or not; it always runs in GitHub Actions, when that cannot be determined (e.g. shallow clone), or with `OMP_FORCE_RUST_TASKS=1`.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
 ## Rust Build Profiles
 
 Profiles live in the root `Cargo.toml`; `.cargo/config.toml` carries the settings Cargo.toml cannot express. Both are committed, so no local `~/.cargo/config.toml` is required.
 
-| Profile | Use |
-| --- | --- |
-| `dev` | Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`. |
-| `release` | Shipping build: fat LTO, 1 codegen unit, stripped. |
-| `local` | Fast local release iteration: thin LTO, 16 codegen units, incremental. |
-| `profiling` | `release` codegen with symbols kept, for `perf`/`samply`/Instruments. |
-| `ci` | Thin LTO, no debuginfo, stripped. |
+|Profile|Use|
+|---|---|
+|`dev`|Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`.|
+|`release`|Shipping build: fat LTO, 1 codegen unit, stripped.|
+|`local`|Fast local release iteration: thin LTO, 16 codegen units, incremental.|
+|`profiling`|`release` codegen with symbols kept, for `perf`/`samply`/Instruments.|
+|`ci`|Thin LTO, no debuginfo, stripped.|
 
 **Never set `split-debuginfo = "off"` on a profile that has debuginfo.** On Mach-O the linker never merges DWARF into the executable — it writes a debug map (`N_OSO`) pointing at the `.o` files, and `"unpacked"` is what keeps those files. With `"off"` every backtrace frame in our own crates silently loses `file:line`; the `panicked at foo.rs:3` header still prints (that is `#[track_caller]`, not debuginfo), which makes the loss easy to miss. `ci` may use `"off"` only because it sets `debug = false`.
 

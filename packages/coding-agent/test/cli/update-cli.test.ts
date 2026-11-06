@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, setAgentDir, setProjectDir, VERSION } from "@oh-my-pi/pi-utils";
 import { currentBuildHost } from "../../src/cli/build-service";
 import { fixedNpmRegistry } from "../../src/cli/npm-registry";
 import { checkForkReleases, getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
 import { cfgUpdateChannel } from "../../src/modes/settings";
+import { AgentStorage } from "../../src/session/agent-storage";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 const npmjs = fixedNpmRegistry();
 
@@ -37,15 +39,25 @@ function stubRegistry(manifests: Record<string, unknown>): string[] {
 }
 
 describe("runUpdateCommand version source", () => {
-	const previousPath = process.env.PATH;
-	const previousBuildUrl = process.env.PI_BUILD_URL;
 	const dirs: string[] = [];
+	let settingsState: SettingsTestState | undefined;
+
+	// `runUpdateCommand` initializes the global Settings singleton from the
+	// project and agent dirs; point both at a scratch dir so the host's config
+	// is never read, and drop the singleton afterwards so later files get a
+	// fresh `Settings.init()`.
+	beforeEach(async () => {
+		settingsState = beginSettingsTest();
+		const scratch = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-update-settings-")));
+		dirs.push(scratch);
+		setProjectDir(scratch);
+		setAgentDir(path.join(scratch, "agent"));
+	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
-		process.env.PATH = previousPath;
-		if (previousBuildUrl === undefined) delete process.env.PI_BUILD_URL;
-		else process.env.PI_BUILD_URL = previousBuildUrl;
+		AgentStorage.close();
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
 		await Promise.all(dirs.splice(0).map(dir => removeWithRetries(dir)));
 	});
 
@@ -448,9 +460,6 @@ describe("taoeffect fork release builds", () => {
 		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
 			output.push(args.join(" "));
 		});
-		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-			throw new Error(`process.exit(${code})`);
-		}) as typeof process.exit);
 
 		await runUpdateCommand({ force: false, check: false, currentVersion: FORK_VERSION });
 
@@ -483,9 +492,6 @@ describe("taoeffect fork release builds", () => {
 		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
 			output.push(args.join(" "));
 		});
-		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-			throw new Error(`process.exit(${code})`);
-		}) as typeof process.exit);
 
 		await runUpdateCommand({ force: false, check: false, currentVersion: FORK_VERSION });
 

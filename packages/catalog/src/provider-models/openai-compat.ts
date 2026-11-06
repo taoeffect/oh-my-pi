@@ -13,7 +13,7 @@ import {
 import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
-import { compareRevision, parseRevision } from "../compat/revision";
+import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
 import { providerEntries, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
@@ -21,6 +21,7 @@ import {
 	fetchOpenAICompatibleModels,
 	type OpenAICompatibleModelMapperContext,
 	type OpenAICompatibleModelRecord,
+	withOpenAICompatibleDiscoveryTimeout,
 } from "../discovery/openai-compatible";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
@@ -43,15 +44,7 @@ import {
 	type TokenCost,
 	runnerApiKind,
 } from "../types";
-import {
-	discoveryFetch,
-	isAnthropicOAuthToken,
-	isRecord,
-	toBoolean,
-	toNumber,
-	toPositiveNumber,
-	toPositiveNumberOrNull,
-} from "../utils";
+import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
@@ -78,15 +71,6 @@ import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
 import { filterModelsDevCatalogRows } from "./models-dev-policies";
 
-function revisionAtLeast(revision: string | undefined, floor: string): boolean {
-	if (revision === undefined) return false;
-	const parsedRevision = parseRevision(revision);
-	const parsedFloor = parseRevision(floor);
-	return (
-		parsedRevision !== undefined && parsedFloor !== undefined && compareRevision(parsedRevision, parsedFloor) >= 0
-	);
-}
-
 function isGlmReasoningIdentity(provider: string, modelId: string, floor: string): boolean {
 	const identity = classifyModel(provider, modelId, { lenient: true });
 	if (identity.class !== "glm" || !revisionAtLeast(identity.revision, floor)) return false;
@@ -98,24 +82,6 @@ const MODELS_DEV_URL = "https://catalog.stencil.so/models.json.zstd";
 
 /** Little-endian magic number opening every zstd frame (RFC 8878). */
 const ZSTD_MAGIC = 0xfd2fb528;
-
-/**
- * Uses a cancellable timer rather than the native abort-timeout helper so
- * successful fast discovery requests do not leave armed timeout signals for
- * concurrent GC to trip over later.
- */
-async function withCatalogDiscoveryTimeout<T>(timeoutMs: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
-	const controller = new AbortController();
-	const timer = setTimeout(
-		() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
-		timeoutMs,
-	);
-	try {
-		return await run(controller.signal);
-	} finally {
-		clearTimeout(timer);
-	}
-}
 
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 const ANTHROPIC_OAUTH_BETA =
@@ -226,8 +192,9 @@ export function fetchWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal
 function fetchRevalidatedWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
 	const session = getCatalogSession(fetchImpl);
 	if (!session.inflight) {
-		session.inflight = withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
-			fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+		session.inflight = withOpenAICompatibleDiscoveryTimeout(
+			DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+			transportSignal => fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
 		).finally(() => {
 			session.inflight = null;
 		});
@@ -239,7 +206,7 @@ function fetchRevalidatedWellKnownModelsWithTimeout(
 	fetchImpl?: FetchImpl,
 	timeoutMs = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 ): Promise<unknown> {
-	return withCatalogDiscoveryTimeout(timeoutMs, signal => fetchRevalidatedWellKnownModels(fetchImpl, signal));
+	return withOpenAICompatibleDiscoveryTimeout(timeoutMs, signal => fetchRevalidatedWellKnownModels(fetchImpl, signal));
 }
 
 async function fetchCatalogPayload(
@@ -545,6 +512,8 @@ function mapWithBundledReference<TApi extends Api>(
 		return {
 			...defaults,
 			name,
+			contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+			maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
 		};
 	}
 	// Generic `/models` rows describe the chat roster. Do not make a bundled
@@ -1725,8 +1694,9 @@ async function fetchDeepinfraModels(options: {
 	const fetchImpl = discoveryFetch(options.fetch);
 	let payload: unknown;
 	try {
-		const response = await withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
-			fetchImpl(`${options.baseUrl}/models${DEEPINFRA_MODELS_QUERY}`, { method: "GET", headers, signal }),
+		const response = await withOpenAICompatibleDiscoveryTimeout(
+			DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+			signal => fetchImpl(`${options.baseUrl}/models${DEEPINFRA_MODELS_QUERY}`, { method: "GET", headers, signal }),
 		);
 		if (!response.ok) {
 			return null;
@@ -2284,7 +2254,7 @@ async function loadSiliconFlowModelsDevReferences(
 	try {
 		// Bounded: this enrichment is optional, so a stalled models.dev must not
 		// hold back the authoritative endpoint request that runs after it.
-		const payload = await withCatalogDiscoveryTimeout(SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS, signal =>
+		const payload = await withOpenAICompatibleDiscoveryTimeout(SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS, signal =>
 			fetchWellKnownModels(fetchImpl, signal),
 		);
 		return createModelsDevReferenceMap<"openai-completions">(
@@ -2828,7 +2798,7 @@ const CLINE_PASS_LIVE_CATALOG_URL = "https://openrouter.ai/api/v1/models";
 /** Enrichment tier, never authoritative: any failure degrades to the bundled path. */
 async function fetchClinePassLiveCatalog(fetchImpl: FetchImpl): Promise<ClinePassLiveCatalog | undefined> {
 	try {
-		const response = await withCatalogDiscoveryTimeout(5_000, signal =>
+		const response = await withOpenAICompatibleDiscoveryTimeout(5_000, signal =>
 			fetchImpl(CLINE_PASS_LIVE_CATALOG_URL, { signal }),
 		);
 		if (!response.ok) return undefined;
@@ -3007,7 +2977,7 @@ async function fetchClinePassModels(
 	// The roster is authoritative for ids; the live reference catalog is a pure
 	// enrichment tier fetched alongside and tolerated away (offline → bundle).
 	const [response, liveCatalog] = await Promise.all([
-		withCatalogDiscoveryTimeout(5_000, signal =>
+		withOpenAICompatibleDiscoveryTimeout(5_000, signal =>
 			fetchImpl(CLINEPASS_MODELS_URL, { signal, headers: clinePassClientHeaders() }),
 		),
 		fetchClinePassLiveCatalog(fetchImpl),
@@ -4221,9 +4191,11 @@ export function kimiCodeModelManagerOptions(
 	config?: KimiCodeModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://api.kimi.com/coding/v1";
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("kimi-code")!;
 	return {
 		providerId: "kimi-code",
+		cacheProviderId: resolveModelCacheProviderId("kimi-code", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
@@ -4420,7 +4392,7 @@ export async function fetchLmStudioNativeModelMetadata(
 	if (options?.signal !== undefined) {
 		return fetchMetadata(options.signal);
 	}
-	return withCatalogDiscoveryTimeout(LM_STUDIO_NATIVE_METADATA_TIMEOUT_MS, fetchMetadata);
+	return withOpenAICompatibleDiscoveryTimeout(LM_STUDIO_NATIVE_METADATA_TIMEOUT_MS, fetchMetadata);
 }
 
 export interface LmStudioModelManagerConfig {
@@ -4768,8 +4740,6 @@ export function basetenModelManagerOptions(
 				cacheWrite: 0,
 			};
 
-			const contextWindow = toPositiveNumber(raw.context_length, reference?.contextWindow ?? defaults.contextWindow);
-			const maxTokens = toPositiveNumber(raw.max_completion_tokens, reference?.maxTokens ?? defaults.maxTokens);
 			const baseModel = mapWithBundledReference(entry, defaults, reference);
 
 			return {
@@ -4777,8 +4747,6 @@ export function basetenModelManagerOptions(
 				reasoning,
 				input: vision ? ["text", "image"] : ["text"],
 				cost,
-				contextWindow,
-				maxTokens,
 				...(supportsTools === false ? { supportsTools } : {}),
 			};
 		},
@@ -5678,7 +5646,7 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 };
 type LiteLLMRichEndpointFailure = {
 	endpoint: string;
-	reason: "http-status" | "invalid-json" | "network-error";
+	reason: "http-status" | "invalid-json" | "invalid-pagination" | "network-error";
 	status?: number;
 	error?: unknown;
 };
@@ -5691,6 +5659,8 @@ type LiteLLMRichEndpointResult<TApi extends Api> =
 	| { failure: LiteLLMRichEndpointFailure };
 
 const LITELLM_RICH_ENDPOINTS = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"] as const;
+// Bound paginated management responses before trusting their advertised page count.
+const LITELLM_MAX_RICH_PAGES = 100;
 export const OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW = 128_000;
 export const OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS = 32_768;
 const UNKNOWN_PROXY_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
@@ -6170,28 +6140,82 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 	if (options.apiKey) {
 		requestHeaders.Authorization = `Bearer ${options.apiKey}`;
 	}
-	let response: Response;
-	try {
-		response = await fetchImpl(`${managementBaseUrl}${endpoint}`, {
-			method: "GET",
-			headers: requestHeaders,
-			signal,
-		});
-	} catch (error) {
-		return { failure: { endpoint, reason: "network-error", error } };
+	const fetchPage = async (
+		page?: number,
+	): Promise<{ payload: unknown; status: number } | { failure: LiteLLMRichEndpointFailure } | null> => {
+		let response: Response;
+		try {
+			response = await fetchImpl(`${managementBaseUrl}${endpoint}${page === undefined ? "" : `?page=${page}`}`, {
+				method: "GET",
+				headers: requestHeaders,
+				signal,
+			});
+		} catch (error) {
+			return { failure: { endpoint, reason: "network-error", error } };
+		}
+		if (!response.ok) {
+			return response.status === 404 && page === undefined
+				? null
+				: { failure: { endpoint, reason: "http-status", status: response.status } };
+		}
+		try {
+			return { payload: await response.json(), status: response.status };
+		} catch (error) {
+			return { failure: { endpoint, reason: "invalid-json", status: response.status, error } };
+		}
+	};
+	const firstPage = await fetchPage();
+	if (!firstPage || "failure" in firstPage) {
+		return firstPage;
 	}
-	if (!response.ok) {
-		return response.status === 404 ? null : { failure: { endpoint, reason: "http-status", status: response.status } };
-	}
-	let payload: unknown;
-	try {
-		payload = await response.json();
-	} catch (error) {
-		return { failure: { endpoint, reason: "invalid-json", status: response.status, error } };
-	}
-	const entries = extractLiteLLMRichEntries(payload);
+	const entries = extractLiteLLMRichEntries(firstPage.payload);
 	if (!entries || entries.length === 0) {
 		return null;
+	}
+	// /v2/model/info returns {current_page, total_pages, data}; older
+	// endpoints and unpaginated /v2 proxies must keep their existing behavior.
+	if (
+		endpoint === "/v2/model/info" &&
+		isRecord(firstPage.payload) &&
+		("current_page" in firstPage.payload || "total_pages" in firstPage.payload)
+	) {
+		const { current_page: currentPage, total_pages: totalPages, total_count: totalCount } = firstPage.payload;
+		const invalidPage = (status: number): LiteLLMRichEndpointResult<TApi> => ({
+			failure: { endpoint, reason: "invalid-pagination", status },
+		});
+		if (
+			currentPage !== 1 ||
+			typeof totalPages !== "number" ||
+			!Number.isSafeInteger(totalPages) ||
+			totalPages < 1 ||
+			totalPages > LITELLM_MAX_RICH_PAGES ||
+			(totalCount !== undefined &&
+				(typeof totalCount !== "number" || !Number.isSafeInteger(totalCount) || totalCount < entries.length))
+		) {
+			return invalidPage(firstPage.status);
+		}
+		const remainingPages = await Promise.all(
+			Array.from({ length: totalPages - 1 }, (_, index) => fetchPage(index + 2)),
+		);
+		for (const [index, nextPage] of remainingPages.entries()) {
+			if (!nextPage || "failure" in nextPage) {
+				return nextPage ?? invalidPage(firstPage.status);
+			}
+			const nextEntries = extractLiteLLMRichEntries(nextPage.payload);
+			if (
+				!isRecord(nextPage.payload) ||
+				nextPage.payload.current_page !== index + 2 ||
+				nextPage.payload.total_pages !== totalPages ||
+				(totalCount !== undefined && nextPage.payload.total_count !== totalCount) ||
+				!nextEntries?.length
+			) {
+				return invalidPage(nextPage.status);
+			}
+			entries.push(...nextEntries);
+		}
+		if (totalCount !== undefined && entries.length !== totalCount) {
+			return invalidPage(firstPage.status);
+		}
 	}
 	const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
 	const excludedModelIds = new Set<string>();
@@ -6335,7 +6359,9 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 	if (options.signal !== undefined) {
 		return fetchModels(options.signal);
 	}
-	return options.timeoutMs !== undefined ? withCatalogDiscoveryTimeout(options.timeoutMs, fetchModels) : fetchModels();
+	return options.timeoutMs !== undefined
+		? withOpenAICompatibleDiscoveryTimeout(options.timeoutMs, fetchModels)
+		: fetchModels();
 }
 
 export async function fetchLiteLLMRichModels<TApi extends Api>(
@@ -6349,8 +6375,10 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v13 routes `mode: decisions` groups to the Decisions runner as judge
-		// rows. rich-v12 invalidates namespaced proxy ids that missed bare catalog
+		// rich-v14 fetches all /v2/model/info pages so cached proxy rosters
+		// include models beyond page one. rich-v13 routes `mode: decisions`
+		// groups to the Decisions runner as judge rows.
+		// rich-v12 invalidates namespaced proxy ids that missed bare catalog
 		// references. rich-v11 excluded ClinePass gateway metadata (issue #10932).
 		// rich-v10 filtered known non-conversational LiteLLM modes, keyed the
 		// deployment's `supports_vision` declaration into cached compat, and
@@ -6484,13 +6512,7 @@ export function nanoGptModelManagerOptions(
 						const maxOutputTokens = entry.max_output_tokens ?? entry.max_completion_tokens;
 						const mapped = mapWithBundledReference(
 							{ ...entry, max_completion_tokens: maxOutputTokens },
-							reference
-								? defaults
-								: {
-										...defaults,
-										contextWindow: toPositiveNumberOrNull(entry.context_length),
-										maxTokens: toPositiveNumberOrNull(maxOutputTokens),
-									},
+							defaults,
 							reference,
 						);
 						return {
@@ -6723,7 +6745,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 			fetchDynamicModels: async () => {
 				const fetchImpl = discoveryFetch(config?.fetch);
 				const requestBaseUrl = isPersonalGitHubCopilotBaseUrl(baseUrl)
-					? ((await withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
+					? ((await withOpenAICompatibleDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
 							discoverGitHubCopilotApiEndpoint(apiKey, fetchImpl, signal),
 						)) ?? baseUrl)
 					: baseUrl;
@@ -7734,6 +7756,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 			return { api: "openai-completions" as const, baseUrl: ZENMUX_OPENAI_BASE_URL };
 		},
 	}),
+	// --- Modular ---
+	openAiCompletionsDescriptor("modular", "modular", "https://api.modular.com/v1"),
 ];
 /** All provider descriptors for models.dev data mapping in generate-models.ts. */
 export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [
@@ -8177,4 +8201,41 @@ export function singularityApiTechModelManagerOptions(
 	config?: SingularityApiModelManagerConfig,
 ): ModelManagerOptions<Api> {
 	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
+}
+
+// ---------------------------------------------------------------------------
+// Scaleway
+// ---------------------------------------------------------------------------
+
+/**
+ * Scaleway discovery configuration: the API key plus optional base-URL and
+ * fetch overrides. Consumed by {@link scalewayModelManagerOptions}, and
+ * exported for extensions and tests that construct the manager directly.
+ */
+export interface ScalewayModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Scaleway model manager: plain OpenAI-compatible chat completions at
+ * `api.scaleway.ai/v1` (fr-par serverless Generative APIs). `/v1/models`
+ * returns bare ids, so the authored seed in `providers/scaleway.kdl` is the
+ * reference each live row merges names, modalities, prices, and limits from;
+ * a successful fetch is the complete roster and prunes retired rows.
+ */
+export function scalewayModelManagerOptions(
+	config?: ScalewayModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "scaleway",
+		defaultBaseUrl: "https://api.scaleway.ai/v1",
+		config,
+		dynamicModelsAuthoritative: true,
+		requireApiKey: true,
+		filterModel: (_entry, model) => !isExcludedModel("scaleway", model.id),
+		mapModel: mapWithBundledReference,
+	});
 }

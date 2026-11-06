@@ -14,6 +14,8 @@ import {
 	type ExtensionWidgetContent,
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
+	type AssistantTextRenderer,
+	type TranscriptPresenter,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 export {
 	type ExtensionUiComponent,
@@ -23,6 +25,11 @@ export {
 	type MessageRenderer,
 	type AssistantThinkingRenderContext,
 	type AssistantThinkingRenderer,
+	type AssistantTextRenderContext,
+	type AssistantTextRenderer,
+	type TranscriptBlock,
+	type TranscriptPresentation,
+	type TranscriptPresenter,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
@@ -38,6 +45,7 @@ import type {
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
+import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	Api,
@@ -64,6 +72,7 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	Keybinding,
 	KeyId,
 	OverlayHandle,
 	OverlayOptions,
@@ -78,6 +87,7 @@ import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
+import type { LiveTranscript } from "../../live/controller";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
@@ -141,7 +151,7 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
 
-export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
+export type { Keybinding, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
@@ -311,6 +321,32 @@ export interface ExtensionUIContext {
 
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
+
+	/**
+	 * Draw the assistant reply sent at `timestamp` (`message.timestamp`) again, re-running the
+	 * assistant text renderers, e.g. after a click changed what they return. Interactive mode only,
+	 * and only while `extensionRenderers.assistantText` is on; a no-op elsewhere.
+	 */
+	rerenderMessage(timestamp: number): void;
+
+	/**
+	 * Ask the transcript presenters again for the blocks with these ids (`TranscriptBlock.id`)
+	 * and redraw those whose display changed. omp re-asks on its own only when a block's data
+	 * changes; call this when the presenter's own state changes (an `agent_end` handler marking a
+	 * run's calls done, say). A changed block with rows already in terminal scrollback replays the
+	 * transcript once. Interactive mode only; a no-op elsewhere.
+	 */
+	refreshTranscript(ids: readonly string[]): void;
+
+	/**
+	 * True while a link whose scheme an extension registered can be picked to raise `link_activate`:
+	 * interactive mode in a plain terminal with `extensionRenderers.assistantText` on, and either the
+	 * link-hint key (`app.links.hint`, Alt+O by default) bound or `tui.mouse` on. Changing the setting,
+	 * or `tui.mouse` while the hint key is unbound, redraws the transcript and re-runs the assistant
+	 * text renderers, so a renderer can read this on each call, e.g. to show content inline instead of
+	 * behind a link nobody can pick. False everywhere else.
+	 */
+	getLinkClicksAvailable(): boolean;
 
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
@@ -638,6 +674,50 @@ export type ExtensionAnnotationsFactory = (
 	sendUserMessage: (text: string, options?: SendUserMessageOptions) => void,
 ) => ExtensionAnnotationsAPI;
 
+/** Options for {@link ExtensionContext.startLive}. */
+export interface ExtensionLiveStartOptions {
+	/**
+	 * SDP offer from the extension's own WebRTC peer, e.g. a browser `RTCPeerConnection` with one
+	 * sendrecv Opus audio track and an `oai-events` data channel. That peer carries all audio;
+	 * the host opens no microphone or speaker.
+	 */
+	sdpOffer: string;
+	/** Realtime voice; defaults to the `live.voice` setting. */
+	voice?: string;
+	/**
+	 * Handlebars template replacing the bundled live instructions, rendered with
+	 * `{ username, firstName }` like the bundled prompt.
+	 */
+	instructions?: string;
+	/**
+	 * Phase changes (`connecting`, `listening`, `working`, `muted`, `error`). `muted` is a request:
+	 * the host has no track to mute, so silence the peer's microphone track until the next phase.
+	 */
+	onPhase?(phase: LivePhase): void;
+	/** Streaming and final transcripts of both sides of the conversation. */
+	onTranscript?(transcript: LiveTranscript): void;
+	/**
+	 * Called exactly once when the session ends, with the failure that ended it if any. A start
+	 * that fails to connect calls it too, before `startLive` rejects.
+	 */
+	onEnd?(error?: Error): void;
+}
+
+/** A live voice session started by {@link ExtensionContext.startLive}. */
+export interface ExtensionLiveSession {
+	/** SDP answer to apply to the extension's peer. */
+	sdpAnswer: string;
+	/** Voice in use. */
+	voice: string;
+	/**
+	 * Ends the session; resolves once it has stopped. Safe to call repeatedly. The host has no media
+	 * peer, so it never sees the extension's peer go away: call this when that peer disconnects
+	 * (`connectionstatechange` to `failed` or `closed`, or the relay socket closing). Until then the
+	 * call stays open and the TUI keeps its live visualizer up.
+	 */
+	stop(): Promise<void>;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -723,6 +803,13 @@ export interface ExtensionContext {
 	 * Optional for compatibility with hosts that do not provide side turns.
 	 */
 	runEphemeralTurn?(options: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
+	/**
+	 * Start a Codex live voice session bound to this session, like `/live`, but with audio on the
+	 * extension's own WebRTC peer (for example a browser on another device). Delegated work runs as
+	 * normal turns of this session. Rejects while another live session is active.
+	 * Optional: present only in hosts that run live sessions (currently interactive mode).
+	 */
+	startLive?(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession>;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
 	/** `/annotate` as an API: build or collect annotation feedback on text and diffs. */
@@ -1208,6 +1295,24 @@ export interface McpNotificationEvent {
 }
 
 // ============================================================================
+// Link Activation Events
+// ============================================================================
+
+/**
+ * The user picked a link whose scheme this extension registered with `pi.registerLinkScheme()`,
+ * by its hint tag or a click. Interactive mode only; delivered to the owning extension only, and
+ * run without the event-handler timeout, like a command. The URL is untrusted: the model can write
+ * such a link with any URL behind any label, so validate it like user input.
+ */
+export interface LinkActivateEvent {
+	type: "link_activate";
+	/** The link's full URL as drawn, e.g. `cc-stretch:open/1792/0/2`. Untrusted. */
+	url: string;
+	/** The registered scheme the URL uses, lowercase and without `:`. */
+	scheme: string;
+}
+
+// ============================================================================
 // User Bash Events
 // ============================================================================
 
@@ -1537,6 +1642,7 @@ export type ExtensionEvent =
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
+	| LinkActivateEvent
 	| UserBashEvent
 	| UserPythonEvent
 	| InputEvent
@@ -1657,6 +1763,20 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * What holds a keyboard chord, as reported by {@link ExtensionAPI.getShortcutConflict}.
+ *
+ * - `reserved`: omp keeps the chord; a shortcut on it is never bound.
+ * - `keybinding`: these keymap actions are bound to it in the main editor: `app.*` actions, which
+ *   usually take the key first where they apply, and `tui.editor.*` / `tui.input.*` editing keys,
+ *   which a shortcut on the chord would take over.
+ * - `extension`: another extension's shortcut is on it; only one of them runs.
+ */
+export type ShortcutConflict =
+	| { kind: "reserved" }
+	| { kind: "keybinding"; keybindings: Keybinding[] }
+	| { kind: "extension"; extensionPath: string };
+
+/**
  * ExtensionAPI passed to extension factory functions.
  *
  * Methods retain their extension binding when destructured or passed as callbacks.
@@ -1757,6 +1877,7 @@ export interface ExtensionAPI {
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
+	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -1845,6 +1966,19 @@ export interface ExtensionAPI {
 		},
 	): void;
 
+	/**
+	 * What already holds `shortcut`, or `undefined` when it is free. Chords compare as the TUI matches
+	 * them (`alt+ctrl+x` is `ctrl+alt+x`; `?` also covers `shift+?`); this extension's own
+	 * registrations don't count. The first of `reserved`, `keybinding`, `extension` is reported.
+	 * Keybindings come from this session's TUI keymap (user remaps included), or omp's defaults
+	 * without a TUI.
+	 *
+	 * Throws while extensions are loading, so call it from a handler, not the factory. Shortcuts are
+	 * bound before `session_start`, so a chord validated there applies once the factory registers it
+	 * on the next start.
+	 */
+	getShortcutConflict(shortcut: KeyId): ShortcutConflict | undefined;
+
 	/** Register a CLI flag. */
 	registerFlag(
 		name: string,
@@ -1870,6 +2004,44 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	/**
+	 * Register a display-only transform for assistant text blocks: it returns the markdown to draw.
+	 * Called with the full text so far each time a streaming update is drawn (replies skip the
+	 * smooth-streaming reveal while renderers are active) and once more when the text is final.
+	 * The session, exports and model context keep the original text. Interactive mode only, and
+	 * only while the `extensionRenderers.assistantText` setting is on.
+	 */
+	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void;
+
+	/**
+	 * Choose how the main session's transcript blocks are drawn (see {@link TranscriptBlock}).
+	 * Presenters are asked in extension load order, the first answer other than `undefined` wins;
+	 * a suspended extension's presenter is skipped. One that throws or answers anything but a
+	 * {@link TranscriptPresentation} (a Promise included) is reported once and draws the block in
+	 * full. Never mutate the block's `args` or `result`: they are omp's live objects. omp may ask
+	 * again at any time (a transcript rebuild, a data change) and keeps no earlier answer: answer
+	 * from the block and the extension's own state only, keyed by block id rather than by run. A
+	 * block the user expanded is always drawn in full, and `display.hideToolActivity` still hides
+	 * tool activity. A focused subagent, a collab guest and the transcript overlays draw stock
+	 * cards. Display only: the session, exports and model context are unchanged. Returns a
+	 * disposer that removes the presenter. Presenters run synchronously while the transcript draws,
+	 * so keep them cheap. Interactive mode only, and only while the
+	 * `extensionRenderers.transcriptPresenters` setting is on; elsewhere the presenter is registered
+	 * but never asked.
+	 */
+	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void;
+
+	/**
+	 * Claim a link scheme (e.g. `"cc-stretch"` for `cc-stretch:…` links). In a plain terminal,
+	 * Markdown links using it draw without the ` (url)` suffix and are never handed to the terminal
+	 * or browser to open; picking one (its `app.links.hint` tag, or a click with `tui.mouse` on)
+	 * raises `link_activate` for this extension. Tern's native view draws them as its own links and
+	 * does not route their clicks back. Interactive mode only, and only while the
+	 * `extensionRenderers.assistantText` setting is on. Throws for an invalid scheme (fewer than two
+	 * characters, or not URL scheme syntax) or a reserved one (`http`, `https`, `file`, `mailto`, …).
+	 */
+	registerLinkScheme(scheme: string): void;
 
 	/**
 	 * Register a composer shape for the interactive editor.
@@ -2083,7 +2255,7 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
-	/** Whether Codex requests should prefer WebSocket transport. */
+	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
 	preferWebsockets?: boolean;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
@@ -2178,6 +2350,8 @@ export interface ExtensionRuntimeState {
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
+	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
+	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -2214,10 +2388,13 @@ export interface ExtensionContextActions {
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
 	openPlanReview?: () => Promise<boolean>;
 	sessionModes?: ExtensionSessionModes;
+	/** The host's effective keymap, user remaps included; omitted outside the TUI, where omp's default keymap applies. */
+	keybindings?: KeybindingsManager;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
 	runEphemeralTurn?: (options: EphemeralTurnOptions) => Promise<EphemeralTurnResult>;
+	startLive?: (options: ExtensionLiveStartOptions) => Promise<ExtensionLiveSession>;
 }
 
 /** Actions for ExtensionCommandContext (ctx.* in command handlers). */
@@ -2250,6 +2427,11 @@ export interface Extension {
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextRenderers: AssistantTextRenderer[];
+	/** Presenters registered with `registerTranscriptPresenter`, in registration order. */
+	transcriptPresenters: TranscriptPresenter[];
+	/** Link schemes claimed with `registerLinkScheme`, lowercase. */
+	linkSchemes: string[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;

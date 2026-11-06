@@ -232,7 +232,11 @@ jobs:
               stage="$RUNNER_TEMP/stage"
               mkdir -p "$stage/$archive" dist
               install -m 0755 "packages/coding-agent/binaries/omp-$TARGET" "$stage/$archive/omp"
-              install -m 0644 README.md LICENSE THIRD-PARTY-NOTICES.txt "$stage/$archive/"
+              install -m 0644 README.md LICENSE "$stage/$archive/"
+              # The CLI and the native addon each have a notices file. The
+              # archive ships one file: CLI notices, then addon notices, like
+              # `omp --license`.
+              { cat packages/coding-agent/THIRD-PARTY-NOTICES.txt; echo; cat packages/natives/THIRD-PARTY-NOTICES.txt; } > "$stage/$archive/THIRD-PARTY-NOTICES.txt"
               tar -C "$stage" -czf "dist/$archive.tar.gz" "$archive"
          - name: Upload release archive
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

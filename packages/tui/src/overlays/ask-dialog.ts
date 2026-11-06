@@ -147,14 +147,21 @@ interface AskDialogCallbacks {
 	): Promise<AskDialogPromptValue | undefined>;
 }
 
+/**
+ * Routes typing to a composer draft that was in progress when the dialog
+ * opened, so in-flight keystrokes never answer by accident. The up/down select
+ * keys are the explicit hand-off: they release the guard for the rest of the
+ * dialog's life and the draft stays parked (intact) beneath it.
+ */
 interface AskDialogInputGuard {
 	isBlocked(): boolean;
 	handleInput(keyData: string): void;
+	/** Shown after the release keys while the guard holds input. */
 	hint: string;
 	/** Mirror the guard's blocked state onto the proxied draft surface each
 	 *  render, so a draft that owns input shows a visible insertion cursor even
-	 *  though this dialog holds TUI focus. */
-	syncPresentation?(): void;
+	 *  though this dialog holds TUI focus, and drops it once the dialog takes over. */
+	syncPresentation?(blocked: boolean): void;
 }
 
 interface AskDialogOptions {
@@ -587,6 +594,8 @@ export class AskDialogComponent implements Component {
 	#native: NativeNode | undefined;
 	/** Input-guard blocked state {@link #native} was described with (the guard flips outside this dialog). */
 	#nativeBlocked = false;
+	/** Set once the user explicitly takes the dialog (up/down, or a pointer action) while a draft held input. */
+	#guardReleased = false;
 	/** When the countdown runs out (epoch ms), for the native ring. */
 	#countdownDeadline = 0;
 	/** Once-a-second re-describe while the native countdown ring is shown. */
@@ -709,9 +718,15 @@ export class AskDialogComponent implements Component {
 			this.toggleQuestionExpansion();
 			return;
 		}
-		const inputGuard = this.options.inputGuard;
-		if (inputGuard?.isBlocked()) {
-			inputGuard.handleInput(keyData);
+		if (this.#guardBlocks()) {
+			if (
+				getKeybindings().matches(keyData, "tui.select.up") ||
+				getKeybindings().matches(keyData, "tui.select.down")
+			) {
+				this.#releaseGuard();
+				return;
+			}
+			this.options.inputGuard?.handleInput(keyData);
 			this.#requestRender();
 			return;
 		}
@@ -736,7 +751,7 @@ export class AskDialogComponent implements Component {
 		// Keep the proxied draft's cursor visible while it owns input (the editor
 		// renders as the next sibling in the same container, so this lands in the
 		// same frame).
-		this.options.inputGuard?.syncPresentation?.();
+		this.options.inputGuard?.syncPresentation?.(this.#guardBlocks());
 		if (this.#hidden) return this.#renderHidden(width);
 		const innerWidth = Math.max(1, width - 4);
 		this.#contentWidth = innerWidth;
@@ -781,10 +796,9 @@ export class AskDialogComponent implements Component {
 	 * countdown, Hide, then Note, Skip and the primary Submit/Next).
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		const inputGuard = this.options.inputGuard;
 		// Same draft-cursor mirroring as render(): the proxied draft describes itself next to this dialog.
-		inputGuard?.syncPresentation?.();
-		const blocked = inputGuard?.isBlocked() ?? false;
+		const blocked = this.#guardBlocks();
+		this.options.inputGuard?.syncPresentation?.(blocked);
 		const ring = this.#countdown !== undefined && cx.supports("meter");
 		if (ring) this.#startRingTick();
 		if (this.#native && this.#nativeBlocked === blocked) return this.#native;
@@ -998,7 +1012,7 @@ export class AskDialogComponent implements Component {
 		if (blocked && inputGuard) {
 			return actionBar([
 				...lead,
-				text([span(plainText(inputGuard.hint), "muted")], { truncate: "end", role: "omp.ask.summary" }),
+				text([span(plainText(this.#guardHint(inputGuard)), "muted")], { truncate: "end", role: "omp.ask.summary" }),
 				skip,
 			]);
 		}
@@ -1045,13 +1059,16 @@ export class AskDialogComponent implements Component {
 				this.#setHidden(event.act === "hide");
 				return;
 			}
-			if (this.#hidden || this.options.inputGuard?.isBlocked()) return;
+			if (this.#hidden) return;
+			// A pointer action on the dialog is an explicit hand-off from the draft.
+			this.#releaseGuardForPointer();
 			if (event.act === "submit") this.#pressEnter();
 			else if (event.act === "note") this.#pressNote();
 			return;
 		}
 		if (event.type !== "select" && event.type !== "activate") return;
-		if (this.#hidden || this.options.inputGuard?.isBlocked()) return;
+		if (this.#hidden) return;
+		this.#releaseGuardForPointer();
 		const key = leafKey(event.key);
 		if (key === "tabs") {
 			if (!this.#hasSubmitTab()) return;
@@ -1212,16 +1229,39 @@ export class AskDialogComponent implements Component {
 		this.#requestRender();
 	}
 
+	/** True while a draft that predates the dialog still owns typing. */
+	#guardBlocks(): boolean {
+		return !this.#guardReleased && (this.options.inputGuard?.isBlocked() ?? false);
+	}
+
+	/** Up/down hand the keyboard to the dialog for good; the draft stays untouched beneath it. */
+	#releaseGuard(): void {
+		this.#guardReleased = true;
+		this.#native = undefined;
+		this.#hidden = false;
+		this.#requestRender();
+	}
+
+	#releaseGuardForPointer(): void {
+		if (!this.#guardBlocks()) return;
+		this.#guardReleased = true;
+		this.#native = undefined;
+	}
+
+	#guardHint(inputGuard: AskDialogInputGuard): string {
+		return `${editorKeys("tui.select.up", "tui.select.down")} answer · ${inputGuard.hint}`;
+	}
+
 	/** Hidden: one line in the composer's place — title (with countdown), the question clipped to fit, and how to bring it back. */
 	#renderHidden(width: number): readonly string[] {
 		const hideKey = editorKey("app.ask.hide");
 		const enter = formatKeyHint("enter");
 		const inputGuard = this.options.inputGuard;
-		const blocked = inputGuard?.isBlocked() ?? false;
+		const blocked = this.#guardBlocks();
 		// While a draft owns input, Enter goes to the draft, so only the hide key restores.
 		const show = blocked ? hideKey : hideKey ? `${hideKey}/${enter}` : enter;
 		const hints: string[] = [];
-		if (blocked && inputGuard) hints.push(inputGuard.hint);
+		if (blocked && inputGuard) hints.push(this.#guardHint(inputGuard));
 		if (show) hints.push(`${show} show`);
 		hints.push(`${editorKey("tui.select.cancel")} cancel`);
 		const hint = theme.fg("dim", ` · ${hints.join(" · ")}`);
@@ -1305,7 +1345,7 @@ export class AskDialogComponent implements Component {
 		const enter = formatKeyHint("enter");
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		const inputGuard = this.options.inputGuard;
-		if (inputGuard?.isBlocked()) return `${inputGuard.hint}${this.#expandHint()} · ${cancel}`;
+		if (inputGuard && this.#guardBlocks()) return `${this.#guardHint(inputGuard)}${this.#expandHint()} · ${cancel}`;
 		if (this.#isSubmitTab()) {
 			const scroll = indicator ? ` ${indicator} scroll ·` : "";
 			return `${enter} submit · ${upDown} scroll ·${scroll} ${cancel}`;
@@ -1532,6 +1572,7 @@ export class AskDialogComponent implements Component {
 			state.note = note.text;
 			state.noteImages = note.images;
 			state.noteRowKey = rowItem.key;
+			this.#justAnswered = undefined;
 		} finally {
 			this.#promptActive = false;
 			this.#runDeferredTimeout();

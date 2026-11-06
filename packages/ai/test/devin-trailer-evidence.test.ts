@@ -115,7 +115,6 @@ describe("streamDevin trailer evidence", () => {
 			code: "invalid_argument",
 			message: "Error",
 			requestBytes: expect.any(Number),
-			compressedBytes: undefined,
 			tools: 0,
 			messages: 1,
 			hadOutput: false,

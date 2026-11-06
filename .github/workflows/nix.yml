@@ -1,54 +1,20 @@
 name: OMP Nix
 
+# Nightly, on-demand, and release runs only. Releases push their `v*` tag
+# atomically with main (scripts/release.ts), so the tag push is the release
+# trigger; branch pushes and pull requests never run this workflow.
 on:
   push:
-    branches: [main]
-    paths:
-      - ".github/workflows/nix.yml"
-      - ".cargo/**"
-      - "flake.nix"
-      - "flake.lock"
-      - "nix/**"
-      - "bun.lock"
-      - "package.json"
-      - "patches/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "packages/**"
-      - "crates/**"
-      - "scripts/**"
-      - "docs/**"
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/workflows/nix.yml"
-      - ".cargo/**"
-      - "flake.nix"
-      - "flake.lock"
-      - "nix/**"
-      - "bun.lock"
-      - "package.json"
-      - "patches/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "packages/**"
-      - "crates/**"
-      - "scripts/**"
-      - "docs/**"
-  # Nightly and on-demand package builds; releases build from their push. See
-  # the `build` job.
+    tags: ["v*"]
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
-# Package builds (nightly, manual, release) get their own never-cancelled group
-# so a later push to main cannot cancel them mid-build. Releases are recognized
-# by the `chore: bump version to ` subject, as in ci.yml.
+# Each run gets its own never-cancelled group so a later run cannot cancel a
+# package build mid-way.
 concurrency:
-  group: "${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: bump version to ')) && format('build-{0}', github.run_id) || github.ref }}"
-  cancel-in-progress: "${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: bump version to ')) }}"
+  group: "${{ github.workflow }}-${{ github.run_id }}"
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -68,15 +34,10 @@ jobs:
       - name: Verify generated Bun dependencies
         run: nix build --no-link .#checks.x86_64-linux.bun-lock --show-trace
 
-  # A cold build without a binary cache takes ~30 minutes, so ordinary pushes
-  # and pull requests only evaluate; the package builds and is smoke-tested
-  # nightly, on manual dispatch, and on release pushes. Thin LTO exercises the
-  # same derivations as release builds at a fraction of the link.
+  # Thin LTO exercises the same derivations as release builds at a fraction of
+  # the link.
   build:
     name: Build package
-    if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore: bump version to '))
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:

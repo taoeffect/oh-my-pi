@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Development installs reuse fastembed’s ONNX Runtime instead of installing a duplicate native runtime.
+
+## [18.14.2] - 2026-10-31
+
+### Fixed
+
+- Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
 ### Fixed
 
 - Fixed local embeddings using one spinning CPU thread per core, so a single recall query cost several CPU-seconds on a many-core machine ([#17109](https://github.com/can1357/oh-my-pi/pull/17109) by [@sjawhar](https://github.com/sjawhar))

@@ -13,6 +13,8 @@
  * instead) still block per call and must keep reporting `blocked`. A call a
  * similar or file grant may answer reports `blocked` only once the wrapper
  * opens the approval menu, since its classifier may run the call with none.
+ * A focused subagent's call reads the subagent's own session approvals and is
+ * never held that way: only the main session's runner signals the menu.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
@@ -24,11 +26,13 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { getApprovalGrants } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
 import {
 	addSimilarApproval,
 	approvalIdentity,
 	approveToolForSession,
 	clearSessionApprovals,
+	isToolApprovedForSession,
 } from "@oh-my-pi/pi-coding-agent/tools/session-approvals";
 import { cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import type { RunStatus } from "@oh-my-pi/pi-coding-agent/utils/run-status";
@@ -36,6 +40,7 @@ import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_ID = "approval-title-test-session";
+const SUBAGENT_SESSION_ID = "approval-title-test-subagent";
 
 /** Exec-tier tool: resolves `prompt` under `always-ask` without user policies. */
 const execTool = { name: "bash", approval: { tier: "exec" } } as unknown as AgentTool;
@@ -55,8 +60,31 @@ const taskTool = { name: "task", approval: { tier: "exec" } } as unknown as Agen
 /** The wrapper calls the controller's approval-preview waiter right before it opens the approval menu. */
 let openApprovalMenu: (toolCallId: string) => Promise<void> = async () => {};
 
-function createFixture(tool: AgentTool = execTool): InteractiveModeContext {
+/** Session surface the controller reads, with its grants under `sessionId`. */
+function viewedSession(tool: AgentTool, sessionId: string) {
+	return {
+		isAborting: false,
+		settings,
+		sessionManager: { getSessionId: () => sessionId, getCwd: () => process.cwd() },
+		getToolByName: () => tool,
+		hasBuiltInTool: () => false,
+		isToolApprovedForSession: (toolName: string) => isToolApprovedForSession(sessionId, toolName),
+		getApprovalGrants: () => getApprovalGrants(settings.getAgentDir(), sessionId),
+	};
+}
+
+/** Context that shows the main session, or a focused subagent's session `viewedSessionId`. */
+function createFixture(tool: AgentTool = execTool, viewedSessionId = SESSION_ID): InteractiveModeContext {
 	const pendingTools = new Map<string, ToolExecutionComponent>();
+	const session = {
+		...viewedSession(tool, SESSION_ID),
+		extensionRunner: {
+			setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>) {
+				openApprovalMenu = waiter;
+				return () => {};
+			},
+		},
+	};
 	const ctx = {
 		isInitialized: true,
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
@@ -64,17 +92,9 @@ function createFixture(tool: AgentTool = execTool): InteractiveModeContext {
 		pendingTools,
 		chatContainer: new TranscriptContainer(),
 		toolOutputExpanded: false,
-		session: {
-			isAborting: false,
-			extensionRunner: {
-				setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>) {
-					openApprovalMenu = waiter;
-					return () => {};
-				},
-			},
-		},
-		viewSession: { getToolByName: () => tool, hasBuiltInTool: () => false },
-		sessionManager: { getSessionId: () => SESSION_ID, getCwd: () => process.cwd() },
+		session,
+		viewSession: viewedSessionId === SESSION_ID ? session : viewedSession(tool, viewedSessionId),
+		sessionManager: session.sessionManager,
 	} as unknown as InteractiveModeContext;
 	return ctx;
 }
@@ -117,6 +137,7 @@ describe("EventController approval run-status mirror", () => {
 	afterEach(() => {
 		for (const component of ctx.pendingTools.values()) component.seal();
 		clearSessionApprovals(SESSION_ID);
+		clearSessionApprovals(SUBAGENT_SESSION_ID);
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
@@ -200,5 +221,24 @@ describe("EventController approval run-status mirror", () => {
 		await controller.handleEvent(toolStart("tc-10", { command: "git diff" }));
 		expect(permissionBlocks(statusSpy)).toBe(1);
 		await menu;
+	});
+
+	it("judges a focused subagent's call by the subagent's session approvals, not the main session's", async () => {
+		approveToolForSession(SESSION_ID, "bash");
+		ctx = createFixture(execTool, SUBAGENT_SESSION_ID);
+		await startToolCall(ctx, "tc-11", { command: "ls" });
+		expect(permissionBlocks(statusSpy)).toBe(1);
+		approveToolForSession(SUBAGENT_SESSION_ID, "bash");
+		await startToolCall(ctx, "tc-12", { command: "ls" });
+		expect(permissionBlocks(statusSpy)).toBe(1);
+	});
+
+	it("reports blocked at start for a focused subagent's call a similar grant may answer", async () => {
+		// Only the main session's runner calls the approval preview waiter, so a
+		// held status for a subagent's call would never be reported.
+		addSimilarApproval(SUBAGENT_SESSION_ID, "bash", "git status", approvalIdentity({ command: "git status" }));
+		ctx = createFixture(execTool, SUBAGENT_SESSION_ID);
+		await startToolCall(ctx, "tc-13", { command: "git diff" });
+		expect(permissionBlocks(statusSpy)).toBe(1);
 	});
 });
