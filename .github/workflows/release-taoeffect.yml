@@ -246,8 +246,11 @@ jobs:
               if-no-files-found: error
               retention-days: 7
 
-   # Runs each archive on its own OS and CPU (darwin-arm64 on Apple silicon
-   # macos-15). This job only runs the binaries; it never signs them.
+   # Runs each Linux archive on its own OS and CPU. This job only runs the
+   # binaries; it never signs them. The darwin-arm64 leg (macos-15) is off:
+   # GitHub rarely has those runners free, so the leg stalled the release.
+   # The macOS steps below stay so the leg can come back as one matrix row:
+   # { target: darwin-arm64, os: macos-15 }
    smoke:
       name: Smoke ${{ matrix.target }}
       needs: [metadata, build]
@@ -259,7 +262,6 @@ jobs:
             include:
                - { target: linux-x64, os: ubuntu-24.04 }
                - { target: linux-arm64, os: ubuntu-24.04-arm }
-               - { target: darwin-arm64, os: macos-15 }
       env:
          VERSION: ${{ needs.metadata.outputs.version }}
       steps:
