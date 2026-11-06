@@ -132,18 +132,20 @@ describe("wait", () => {
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed" });
 	});
 
-	test("back-to-back idle waits climb the ladder and, from the 30m rung on, send the agent back to work", async () => {
+	test("back-to-back idle waits climb the ladder and, from the second rung on, send the agent back to work", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 		const tool = new WaitTool(session(manager));
-		const first = await elapse(tool, 600_000);
+		const first = await elapse(tool, 60_000);
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
 		expect(notice(first)).toBeUndefined();
-		expect(notice(await elapse(tool, 1_800_000))).toContain("40m");
-		expect(notice(await elapse(tool, 1_800_000))).toContain("1h10m");
+		expect(notice(await elapse(tool, 300_000))).toContain("6m");
+		expect(notice(await elapse(tool, 600_000))).toContain("16m");
+		expect(notice(await elapse(tool, 1_800_000))).toContain("46m");
+		expect(notice(await elapse(tool, 1_800_000))).toContain("1h16m");
 		build.resolve("done");
 	});
 
@@ -153,10 +155,10 @@ describe("wait", () => {
 		const build = Promise.withResolvers<string>();
 		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 		const tool = new WaitTool(session(manager));
-		await elapse(tool, 600_000);
+		await elapse(tool, 60_000);
 		vi.advanceTimersByTime(60_000);
-		expect(notice(await elapse(tool, 600_000))).toBeUndefined();
-		await elapse(tool, 1_800_000);
+		expect(notice(await elapse(tool, 60_000))).toBeUndefined();
+		await elapse(tool, 300_000);
 		const lint = Promise.withResolvers<string>();
 		manager.register("bash", "lint", async () => lint.promise, { ownerId: "Main" });
 		const woke = tool.execute("wait-news", {});
@@ -165,7 +167,7 @@ describe("wait", () => {
 		await flushMicrotasks();
 		vi.advanceTimersByTime(1_500);
 		expect((await woke).useless).toBeUndefined();
-		expect(notice(await elapse(tool, 600_000))).toBeUndefined();
+		expect(notice(await elapse(tool, 60_000))).toBeUndefined();
 		build.resolve("done");
 	});
 
@@ -768,8 +770,8 @@ describe("wait", () => {
 			await ask();
 			vi.useFakeTimers();
 			const tool = new WaitTool(session(new AsyncJobManager({}), "Child"));
-			expect(await idleText(elapse(tool, 600_000))).toContain("No reply within 10m");
-			expect(notice(await elapse(tool, 1_800_000))).toContain("40m");
+			expect(await idleText(elapse(tool, 60_000))).toContain("No reply within 1m");
+			expect(notice(await elapse(tool, 300_000))).toContain("6m");
 		});
 
 		test("returns at once while the agent asked waits on the user, and blocks again once they answer", async () => {

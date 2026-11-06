@@ -28,11 +28,10 @@ const waitSchema = type({});
  * nothing new. Each back-to-back idle wait climbs one rung and the last rung
  * repeats. Fork values (see "Wait ladder" in AGENTS.md): a model blocked on a
  * job has nothing else to do, so a seconds-long window only buys a filler
- * turn. The 10-minute first window gives a long job one check-in while a
- * 30-minute provider prompt cache is still live; after that the window is the
- * old 30-minute cap.
+ * turn. The 1-minute first window still catches a short job soon; the windows
+ * then climb to the old 30-minute cap.
  */
-const WAIT_LADDER_MS = [600_000, 1_800_000] as const;
+const WAIT_LADDER_MS = [60_000, 300_000, 600_000, 1_800_000] as const;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
 /** First rung whose elapsed window appends the progress reminder: one idle wait is patience, a second back-to-back is a loop. */

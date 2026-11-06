@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `wait` with nothing new now returns after 10 minutes, then every 30 minutes on back-to-back waits (was 5s, growing to 5m), so an agent waiting on a long job no longer wakes after a few seconds to post a status message
+- `wait` with nothing new now returns after 1 minute, then 5, 10, and every 30 minutes on back-to-back waits (was 5s, growing to 5m), so an agent waiting on a long job no longer wakes after a few seconds to post a status message
 
 ## [18.17.0] - 2026-11-06
 

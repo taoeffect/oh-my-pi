@@ -80,8 +80,8 @@ Add one `###` subsection per feature below this one. Use these fields:
 
 ### Wait ladder
 
-- **Keep**: A `wait` with nothing new blocks for 10 minutes. The next back-to-back idle `wait` blocks for 30 minutes, and each wait after that also blocks for 30 minutes. A settled job, a direct message, or a steer still ends a wait at once.
-- **Fork code**: `WAIT_LADDER_MS = [600_000, 1_800_000]` in `packages/coding-agent/src/tools/wait.ts`, the ladder line in `docs/tools/wait.md`, and the ladder tests in `packages/coding-agent/test/tools/wait.test.ts`.
+- **Keep**: A `wait` with nothing new blocks for 1 minute. Back-to-back idle waits then block for 5 minutes, then 10 minutes, then 30 minutes, and each wait after that also blocks for 30 minutes. A settled job, a direct message, or a steer still ends a wait at once.
+- **Fork code**: `WAIT_LADDER_MS = [60_000, 300_000, 600_000, 1_800_000]` in `packages/coding-agent/src/tools/wait.ts`, the ladder line in `docs/tools/wait.md`, and the ladder tests in `packages/coding-agent/test/tools/wait.test.ts`.
 - **Rejected upstream**: the window values of commit `4565560e28` (upstream 18.17.0). It returns an idle `wait` after 5s and climbs 5s → 10s → 30s → 1m → 5m. A model that waits on a job has nothing else to do, so it wakes after 5s only to post a filler message. Keep the rest of the commit: the ladder itself (`IdleStreak`, `WAIT_LADDER_RESET_MS`, `WAIT_NOTICE_RUNG`) and the `wait-idle.md` notice.
 - **Markers**: `5_000, 10_000, 30_000|climbs 5s|10s rung`
 - **Check**: `bun test test/tools/wait.test.ts` in `packages/coding-agent`.
