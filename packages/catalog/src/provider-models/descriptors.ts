@@ -78,6 +78,7 @@ import {
 	xaiOAuthModelManagerOptions,
 	xiaomiModelManagerOptions,
 	yoloAutoModelManagerOptions,
+	zaiModelManagerOptions,
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
@@ -90,7 +91,6 @@ import {
 	localModelManagerOptions,
 	typesafeModelManagerOptions,
 	webModelManagerOptions,
-	zaiModelManagerOptions,
 } from "./special";
 
 export type { KnownProvider } from "../compat/provider-ids";

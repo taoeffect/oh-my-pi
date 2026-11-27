@@ -449,15 +449,3 @@ export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig =
 			: undefined),
 	};
 }
-// ---------------------------------------------------------------------------
-// Zai
-// ---------------------------------------------------------------------------
-
-export interface ZaiModelManagerConfig {}
-
-/** Creates model-manager options for Z.AI's mixed native and Anthropic transports. */
-export function zaiModelManagerOptions(
-	_config: ZaiModelManagerConfig = {},
-): ModelManagerOptions<"anthropic-messages" | "openai-completions"> {
-	return { providerId: "zai" };
-}

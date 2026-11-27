@@ -2316,9 +2316,9 @@ Z.AI provides GLM family models (such as `glm-5.2`) via Zhipu AI's coding plan i
 
 Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zai.kdl` (more-specific selectors override provider defaults):
 
-- For class glm; family flash: `thinking.efforts=["minimal","low","medium","high","xhigh"]`, `thinking.mode="budget"`.
-- For class glm; family turbo: `thinking.efforts=["minimal","low","medium","high","xhigh"]`, `thinking.mode="budget"`.
-- For models *5, *v, glm-4.5-air, glm-4.6, glm-4.7, glm-5.1: `thinking.efforts=["minimal","low","medium","high","xhigh"]`, `thinking.mode="budget"`.
+- For class glm; family flash: `thinking.mode="budget"`; revision <5.3: `thinking.efforts=["minimal","low","medium","high","xhigh"]`.
+- For class glm; family turbo: `thinking.mode="budget"`; revision <5.3: `thinking.efforts=["minimal","low","medium","high","xhigh"]`.
+- For models glm-4.5, glm-4.5v, glm-4.5-air, glm-4.6, glm-4.6v, glm-4.7, glm-5, glm-5.1: `thinking.efforts=["minimal","low","medium","high","xhigh"]`, `thinking.mode="budget"`.
 - For models glm-5.2: `thinking.efforts=["high","max"]`, `thinking.mode="anthropic-budget-effort"`.
 - For models glm-5.3-flash: `clampOutputToModelMax=true`, `thinking.mode="anthropic-budget-effort"`.
 - Provider defaults: `requiresToolResultId=true`.
@@ -2340,6 +2340,8 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zai.
 
 - **Provider entry (`zai`)**: `packages/catalog/src/compat/rules/providers/zai.kdl` declares default model `glm-5.3`. Environment keys: `ZAI_API_KEY`.
 - **Authored seeds**: `glm-5.3`, `glm-5.3-flash`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Additive discovery**: With a key, `zaiModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) lists `https://api.z.ai/api/coding/paas/v4/models` and adds every id it finds, without pruning bundled ids the listing omits. Each id takes its route from `resolveZaiApi` and its metadata from the bundle, then Z.AI's models.dev rows (pay-as-you-go `zai`, then `zai-coding-plan`), then a bundled canonical reference. Prices stay with the bundle and the pay-as-you-go catalog.
+- **Published effort tiers**: `withZaiPublishedEffortLadder` gives a model the effort tiers that Z.AI's models.dev row publishes, when no model-scoped KDL rule sets its ladder. The tiers also replace a bundled row's ladder, which is a guess in that case. The KDL wire mode for the route stays.
 
 ## ZenMux (`zenmux`)
 

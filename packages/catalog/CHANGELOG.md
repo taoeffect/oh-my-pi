@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Z.AI (GLM Coding Plan) now lists new GLM models from the Z.AI coding endpoint, with no omp upgrade needed
+
+### Fixed
+
+- Fixed new Z.AI GLM models (such as GLM-5.4) offering guessed thinking levels; they now offer the levels Z.AI publishes
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

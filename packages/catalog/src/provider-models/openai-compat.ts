@@ -2265,6 +2265,34 @@ async function loadSiliconFlowModelsDevReferences(
 	}
 }
 
+/**
+ * Fills a discovered id missing from the provider's own references with the
+ * intrinsic capabilities and canonical limits of any bundled upstream/reseller
+ * entry — never its pricing, which is provider-specific.
+ */
+function mapWithCanonicalCapabilities<TApi extends Api>(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<TApi>,
+): ModelSpec<TApi> {
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as ModelSpec<TApi> | undefined;
+	if (!canonical) {
+		return defaults;
+	}
+	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokens =
+		canonical.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical.maxTokens ?? defaults.maxTokens);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		contextWindow,
+		maxTokens,
+	};
+}
+
 function createSiliconFlowModelManagerOptions(
 	providerId: "siliconflow" | "siliconflow-cn",
 	defaultBaseUrl: string,
@@ -2279,10 +2307,6 @@ function createSiliconFlowModelManagerOptions(
 		...(apiKey && {
 			fetchDynamicModels: async () => {
 				const modelsDevReferences = await loadSiliconFlowModelsDevReferences(providerId, config?.fetch);
-				// Resolved here, not at options construction: walking the bundled
-				// reference index is only worth paying for when dynamic discovery
-				// actually runs, keeping the ModelManager cache fast path cheap.
-				const canonicalReferences = getBundledModelReferenceIndex();
 				return fetchOpenAICompatibleModels({
 					api: "openai-completions",
 					provider: providerId,
@@ -2291,31 +2315,10 @@ function createSiliconFlowModelManagerOptions(
 					filterModel: (_entry, model) => isLikelySiliconFlowChatModelId(model.id),
 					mapModel: (entry, defaults) => {
 						const modelsDevReference = modelsDevReferences.get(defaults.id);
-						if (modelsDevReference) {
-							return mapWithBundledReference(entry, defaults, modelsDevReference);
-						}
-						// ids missing from models.dev (new launches) still recover intrinsic
-						// capabilities and canonical limits from any bundled upstream/reseller
-						// entry — but never its pricing, which is provider-specific.
-						const canonical = resolveModelReference(defaults.id, canonicalReferences) as
-							| ModelSpec<"openai-completions">
-							| undefined;
-						if (!canonical) {
-							return defaults;
-						}
-						const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
-						const maxTokens =
-							canonical.maxTokens != null && contextWindow != null
-								? Math.min(canonical.maxTokens, contextWindow)
-								: (canonical.maxTokens ?? defaults.maxTokens);
-						return {
-							...defaults,
-							name: toModelName(entry.name, canonical.name ?? defaults.name),
-							reasoning: canonical.reasoning,
-							input: canonical.input,
-							contextWindow,
-							maxTokens,
-						};
+						// ids missing from models.dev (new launches) fall back to bundled canonical capabilities.
+						return modelsDevReference
+							? mapWithBundledReference(entry, defaults, modelsDevReference)
+							: mapWithCanonicalCapabilities(entry, defaults);
 					},
 					fetch: config?.fetch,
 				});
@@ -7273,8 +7276,10 @@ const ZAI_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
 // general PAYG `/api/paas/v4`, which would bypass plan quota or fail auth.
 const ZAI_OPENAI_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
 
+type ZaiApi = "anthropic-messages" | "openai-completions";
+
 /** Resolves the transport and endpoint for one Z.AI model catalog entry. */
-export function resolveZaiApi(modelId: string): { api: "anthropic-messages" | "openai-completions"; baseUrl: string } {
+export function resolveZaiApi(modelId: string): { api: ZaiApi; baseUrl: string } {
 	const api = apiRouteFor("zai", modelId)?.api ?? "anthropic-messages";
 	switch (api) {
 		case "anthropic-messages":
@@ -7284,6 +7289,108 @@ export function resolveZaiApi(modelId: string): { api: "anthropic-messages" | "o
 		default:
 			throw new Error(`Unsupported Z.AI API route: ${api}`);
 	}
+}
+
+/**
+ * Z.AI's catalog rows publish each model's effort tiers. They replace omp's
+ * guess wherever no model-scoped rule sets the ladder. The route's wire mode
+ * stays: the tiers name the dial, not the transport that sends it.
+ */
+function withZaiPublishedEffortLadder(model: ModelSpec<Api>, _modelId: string, raw: ModelsDevModel): ModelSpec<Api> {
+	const efforts = publishedEffortLadder(raw);
+	if (!efforts || !model.reasoning || hasModelScopedEffortLadder(model)) return model;
+	const mode = resolveModelPolicy(model).thinking?.mode;
+	return mode ? { ...model, thinking: { mode, efforts } } : model;
+}
+
+function zaiModelsDevDescriptor(modelsDevKey: "zai" | "zai-coding-plan"): ModelsDevProviderDescriptor {
+	return anthropicMessagesDescriptor(modelsDevKey, "zai", ZAI_ANTHROPIC_BASE_URL, {
+		resolveApi: modelId => resolveZaiApi(modelId),
+		transformModel: withZaiPublishedEffortLadder,
+	});
+}
+
+const ZAI_MODELS_DEV_DESCRIPTOR = zaiModelsDevDescriptor("zai");
+
+/**
+ * The models.dev GLM Coding Plan section, read only to describe ids the coding
+ * endpoint lists but the pay-as-you-go section lacks. It stays out of
+ * `MODELS_DEV_PROVIDER_DESCRIPTORS`: its $0 subscription rates would show every
+ * GLM model as free (issue #5598).
+ */
+const ZAI_CODING_PLAN_MODELS_DEV_DESCRIPTOR = zaiModelsDevDescriptor("zai-coding-plan");
+
+const ZAI_MODELS_DEV_REFERENCE_TIMEOUT_MS = 5_000;
+
+/**
+ * Bundled rows, then models.dev pay-as-you-go rows, then models.dev coding-plan
+ * rows. Published effort tiers survive a bundled row: the bundle re-derives
+ * thinking from KDL, so where no model-scoped rule owns the ladder (the only
+ * case the tiers are set) its ladder is a guess.
+ */
+async function loadZaiModelReferences(fetchImpl?: FetchImpl): Promise<Map<string, ModelSpec<ZaiApi>>> {
+	const references = new Map<string, ModelSpec<ZaiApi>>();
+	try {
+		// Bounded: this enrichment is optional and holds back the endpoint request.
+		const payload = await withOpenAICompatibleDiscoveryTimeout(ZAI_MODELS_DEV_REFERENCE_TIMEOUT_MS, signal =>
+			fetchWellKnownModels(fetchImpl, signal),
+		);
+		if (isRecord(payload)) {
+			const descriptors = [ZAI_CODING_PLAN_MODELS_DEV_DESCRIPTOR, ZAI_MODELS_DEV_DESCRIPTOR];
+			for (const model of mapModelsDevToModels(payload, descriptors)) {
+				references.set(model.id, model as ModelSpec<ZaiApi>);
+			}
+		}
+	} catch {
+		// Without models.dev, new ids fall back to bundled canonical capabilities.
+	}
+	for (const [id, bundled] of createBundledReferenceMap<ZaiApi>("zai")) {
+		const published = references.get(id)?.thinking;
+		references.set(id, published && bundled.reasoning ? { ...bundled, thinking: published } : bundled);
+	}
+	return references;
+}
+
+/** No `baseUrl`: the registry passes the provider's first model URL, the Anthropic route, which serves no `/models`. */
+export interface ZaiModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Z.AI GLM Coding Plan: the bundled models plus every id the coding endpoint's
+ * `/models` lists. Discovery adds ids and never prunes: the listing has left out
+ * ids the plan serves (GLM-5.3 at launch, see `providers/zai.kdl`). Rows carry
+ * bare ids, so each id takes its route from `api-routes` and its metadata from
+ * the bundle, then Z.AI's models.dev rows (with their published effort tiers),
+ * then a bundled canonical reference. Coding-plan rows carry $0 subscription
+ * rates, which the model manager fills from the pay-as-you-go catalog.
+ */
+export function zaiModelManagerOptions(config: ZaiModelManagerConfig = {}): ModelManagerOptions<ZaiApi> {
+	const { apiKey } = config;
+	return {
+		providerId: "zai",
+		...(apiKey && {
+			fetchDynamicModels: async () => {
+				const references = await loadZaiModelReferences(config.fetch);
+				return fetchOpenAICompatibleModels<ZaiApi>({
+					api: "openai-completions",
+					provider: "zai",
+					baseUrl: ZAI_OPENAI_BASE_URL,
+					apiKey,
+					filterModel: (_entry, model) => !isExcludedModel("zai", model.id),
+					mapModel: (entry, defaults) => {
+						const routed = { ...defaults, ...resolveZaiApi(defaults.id) };
+						const reference = references.get(defaults.id);
+						return reference
+							? mapWithBundledReference(entry, routed, reference)
+							: mapWithCanonicalCapabilities(entry, routed);
+					},
+					fetch: config.fetch,
+				});
+			},
+		}),
+	};
 }
 
 const COPILOT_DEFAULT_RESOLUTION = {
@@ -7564,9 +7671,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 	// SKU as "Free" in `/models`. The PAYG key carries the real per-token rates for
 	// the identical model ids, so the enumerated token costs line up with the other
 	// subscription providers for comparison (issue #5598).
-	anthropicMessagesDescriptor("zai", "zai", ZAI_ANTHROPIC_BASE_URL, {
-		resolveApi: modelId => resolveZaiApi(modelId),
-	}),
+	ZAI_MODELS_DEV_DESCRIPTOR,
 	// --- Umans AI ---
 	// Source the pay-as-you-go catalog: the coding-plan key publishes subscription
 	// costs as zero, while `/models/info` omits pricing entirely. The generator
