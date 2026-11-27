@@ -143,6 +143,14 @@ async function withTimeout<T>(promise: Promise<T>, description: string, timeoutM
 	}
 }
 
+async function until(condition: () => boolean, description: string, timeoutMs = 5_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error(`Timed out waiting for ${description}`);
+		await Bun.sleep(5);
+	}
+}
+
 const fixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server.ts");
 const initializeParams = (processId = 424242, initializationOptions: unknown = {}): Record<string, unknown> => ({
 	processId,
@@ -287,6 +295,9 @@ describe("LspMuxServer", () => {
 		const firstClosed = first.client.waitForClose();
 		first.client.destroy();
 		await firstClosed;
+		// The client sees its own close at once; the mux sees it later, on its end of the link.
+		// A link that arrives before then finds the server still bound and spawns another.
+		await until(() => server.sessionCount === 0, "the mux to drop the closed session");
 
 		const second = await link();
 		expect(second.connected.spawned).toBe(false);

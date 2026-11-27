@@ -6,6 +6,10 @@
 
 - `wait` with nothing new now returns after 1 minute, then 5, 10, and every 30 minutes on back-to-back waits (was 5s, growing to 5m), so an agent waiting on a long job no longer wakes after a few seconds to post a status message
 
+### Fixed
+
+- The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

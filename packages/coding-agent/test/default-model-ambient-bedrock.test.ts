@@ -28,14 +28,18 @@ describe("issue #9967 default model with ambient Bedrock credentials", () => {
 	let savedAccessKey: string | undefined;
 	let savedSecret: string | undefined;
 	let savedBearerToken: string | undefined;
+	let savedMetadataDisabled: string | undefined;
 
 	beforeEach(async () => {
 		savedAccessKey = process.env.AWS_ACCESS_KEY_ID;
 		savedSecret = process.env.AWS_SECRET_ACCESS_KEY;
 		savedBearerToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
+		savedMetadataDisabled = process.env.AWS_EC2_METADATA_DISABLED;
 		delete process.env.AWS_ACCESS_KEY_ID;
 		delete process.env.AWS_SECRET_ACCESS_KEY;
 		delete process.env.AWS_BEARER_TOKEN_BEDROCK;
+		// CI can run on EC2, where the instance role is an ambient Bedrock source.
+		process.env.AWS_EC2_METADATA_DISABLED = "true";
 		tempDir = path.join(os.tmpdir(), `pi-9967-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		authStorage = createInMemoryAuthStorage();
@@ -52,6 +56,8 @@ describe("issue #9967 default model with ambient Bedrock credentials", () => {
 		else process.env.AWS_SECRET_ACCESS_KEY = savedSecret;
 		if (savedBearerToken === undefined) delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 		else process.env.AWS_BEARER_TOKEN_BEDROCK = savedBearerToken;
+		if (savedMetadataDisabled === undefined) delete process.env.AWS_EC2_METADATA_DISABLED;
+		else process.env.AWS_EC2_METADATA_DISABLED = savedMetadataDisabled;
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 	function getRelevantModels() {
